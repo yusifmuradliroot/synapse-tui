@@ -165,11 +165,11 @@ pub fn draw(cv: &mut Canvas, v: Variant, cell: &mut Cell, env: &mut Env) {
             }
         }
         Variant::CoinX => {
-            draw_solid(cv, t, true, env.dark_bg);
+            draw_solid(cv, t, true, env.dark_bg, None);
             return;
         }
         Variant::CoinY => {
-            draw_solid(cv, t, false, env.dark_bg);
+            draw_solid(cv, t, false, env.dark_bg, None);
             return;
         }
         _ => {}
@@ -312,6 +312,7 @@ pub fn draw(cv: &mut Canvas, v: Variant, cell: &mut Cell, env: &mut Env) {
         fx,
         t,
         frame,
+        scan: -1.0,
     };
     if v == Variant::Trail {
         for j in (0..3).rev() {

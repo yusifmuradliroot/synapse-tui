@@ -53,6 +53,7 @@ pub enum Fx {
     Scan,
     Wipe,
     Wave,
+    ScanFill,
 }
 
 pub struct Pass {
@@ -66,6 +67,25 @@ pub struct Pass {
     pub fx: Fx,
     pub t: f64,
     pub frame: u32,
+    pub scan: f64,
+}
+
+impl Pass {
+    pub fn base(t: f64, frame: u32) -> Pass {
+        Pass {
+            th_u: 0.0,
+            th_d: 0.0,
+            sx: 1.0,
+            sy: 1.0,
+            ox: 0.0,
+            oy: 0.0,
+            pv: (0.0, 0.0),
+            fx: Fx::None,
+            t,
+            frame,
+            scan: -1.0,
+        }
+    }
 }
 
 pub struct Canvas {
@@ -191,9 +211,18 @@ pub fn draw_pass(cv: &mut Canvas, p: &Pass) {
                         continue;
                     }
                 }
-                Fx::Scan => {
-                    let sc = (p.t * 30.0).rem_euclid(cv.n as f64 + 28.0) - 14.0;
-                    if (py - sc).abs() > 7.0 {
+                Fx::Scan | Fx::ScanFill => {
+                    let sc = if p.scan >= 0.0 {
+                        p.scan
+                    } else {
+                        (p.t * 30.0).rem_euclid(cv.n as f64 + 28.0) - 14.0
+                    };
+                    let cut = if p.fx == Fx::ScanFill {
+                        py > sc + 7.0
+                    } else {
+                        (py - sc).abs() > 7.0
+                    };
+                    if cut {
                         continue;
                     }
                 }
@@ -222,10 +251,16 @@ pub fn draw_pass(cv: &mut Canvas, p: &Pass) {
     }
 }
 
-pub fn draw_solid(cv: &mut Canvas, t: f64, axis_x: bool, dark_bg: bool) {
-    let mut a = t * 1.5;
+pub fn draw_solid(cv: &mut Canvas, t: f64, axis_x: bool, dark_bg: bool, angle: Option<f64>) {
+    let auto = t * 1.5;
+    let mut a = match angle {
+        Some(v) => v,
+        None => auto,
+    };
     for _ in 0..4 {
-        a += 0.004 * (0.5 + (1.0 - a.cos().abs()));
+        if angle.is_none() {
+            a += 0.004 * (0.5 + (1.0 - a.cos().abs()));
+        }
     }
     let wob = 0.16 * (t * 1.15).sin();
     let wob2 = 0.12 * ((t * 0.83) + 1.4).sin();
