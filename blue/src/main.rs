@@ -42,24 +42,6 @@ fn mirror_x(cv: &mut Canvas) {
     }
 }
 
-fn mirror_xy(cv: &mut Canvas) {
-    let n = cv.n;
-    for y in 0..(n + 1) / 2 {
-        for x in 0..(n + 1) / 2 {
-            let mx = n - 1 - x;
-            let my = n - 1 - y;
-            let m = cv.px[(y * n + x) as usize]
-                .max(cv.px[(y * n + mx) as usize])
-                .max(cv.px[(my * n + x) as usize])
-                .max(cv.px[(my * n + mx) as usize]);
-            cv.px[(y * n + x) as usize] = m;
-            cv.px[(y * n + mx) as usize] = m;
-            cv.px[(my * n + x) as usize] = m;
-            cv.px[(my * n + mx) as usize] = m;
-        }
-    }
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -172,11 +154,13 @@ fn main() {
                 mirror_x(&mut cv);
             }
             Phase::Hold => {
-                let mut p = Pass::base(0.0, 0);
+                let mut p = Pass::base(0.0, frame_no);
                 p.th_u = 0.0;
                 p.th_d = 0.0;
+                p.fx = Fx::ScanFill;
+                p.scan = -14.0 + (nf + 28.0);
                 render::draw_pass(&mut cv, &p);
-                mirror_xy(&mut cv);
+                mirror_x(&mut cv);
             }
         }
         frame_no = frame_no.wrapping_add(1);
