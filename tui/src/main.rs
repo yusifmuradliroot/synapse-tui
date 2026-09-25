@@ -48,6 +48,7 @@ enum Key {
     Down,
     Left,
     Right,
+    F11,
 }
 
 struct Screen {
@@ -56,7 +57,13 @@ struct Screen {
     top: Vec<u8>,
     bot: Vec<u8>,
     ch: Vec<char>,
+    bg: (u8, u8, u8),
 }
+
+const BG_FULL_BLUE: (u8, u8, u8) = (0, 0, 255);
+const BG_BLACK: (u8, u8, u8) = (0, 0, 0);
+const BG_DEEP_BLUE: (u8, u8, u8) = (12, 18, 96);
+const BG_CYCLE: [(u8, u8, u8); 3] = [BG_FULL_BLUE, BG_BLACK, BG_DEEP_BLUE];
 
 impl Screen {
     fn new(w: usize, h: usize) -> Screen {
@@ -66,12 +73,19 @@ impl Screen {
             top: vec![0; w * h],
             bot: vec![0; w * h],
             ch: vec![' '; w * h],
+            bg: BG_FULL_BLUE,
         }
+    }
+
+    fn set_bg(&mut self, bg: (u8, u8, u8)) {
+        self.bg = bg;
     }
 
     fn reset(&mut self, w: usize, h: usize) {
         if w != self.w || h != self.h {
+            let bg = self.bg;
             *self = Screen::new(w, h);
+            self.bg = bg;
         } else {
             self.top.iter_mut().for_each(|v| *v = 0);
             self.bot.iter_mut().for_each(|v| *v = 0);
@@ -100,7 +114,7 @@ impl Screen {
             }
             let idx = y as usize * self.w + xi as usize;
             self.top[idx] = v;
-            self.bot[idx] = v;
+            self.bot[idx] = 0;
             self.ch[idx] = b as char;
         }
     }
@@ -120,36 +134,48 @@ impl Screen {
     fn render(&self) -> String {
         let mut out = String::with_capacity(self.w * self.h * 6);
         out.push_str("\x1b[?2026h\x1b[H");
-        let mut last_f: i32 = -1;
-        let mut last_b: i32 = -1;
+        let bg = self.bg;
+        let mut last_f: (i32, i32, i32) = (-1, -1, -1);
+        let mut last_b: (i32, i32, i32) = (-1, -1, -1);
         for y in 0..self.h {
             if y > 0 {
                 out.push_str(&format!("\x1b[{};1H", y + 1));
             }
             for x in 0..self.w {
-                let t = self.top[y * self.w + x] as i32;
-                let b = self.bot[y * self.w + x] as i32;
-                if t != last_f {
+                let i = y * self.w + x;
+                let t = self.top[i];
+                let b = self.bot[i];
+                let fc = if t > 0 {
+                    (t as i32, t as i32, t as i32)
+                } else {
+                    (bg.0 as i32, bg.1 as i32, bg.2 as i32)
+                };
+                let bc = if b > 0 {
+                    (b as i32, b as i32, b as i32)
+                } else {
+                    (bg.0 as i32, bg.1 as i32, bg.2 as i32)
+                };
+                if fc != last_f {
                     if t > 0 {
-                        out.push_str(&format!("\x1b[38;2;{t};{t};{t}m"));
+                        out.push_str(&format!("\x1b[38;2;{};{};{}m", fc.0, fc.1, fc.2));
                     } else {
                         out.push_str("\x1b[39m");
                     }
-                    last_f = t;
+                    last_f = fc;
                 }
-                if b != last_b {
+                if bc != last_b {
                     if b > 0 {
-                        out.push_str(&format!("\x1b[48;2;{b};{b};{b}m"));
+                        out.push_str(&format!("\x1b[48;2;{};{};{}m", bc.0, bc.1, bc.2));
                     } else {
-                        out.push_str("\x1b[49m");
+                        out.push_str(&format!("\x1b[48;2;{};{};{}m", bg.0, bg.1, bg.2));
                     }
-                    last_b = b;
+                    last_b = bc;
                 }
-                out.push(self.ch[y * self.w + x]);
+                out.push(self.ch[i]);
             }
             out.push_str("\x1b[0m");
-            last_f = -1;
-            last_b = -1;
+            last_f = (-1, -1, -1);
+            last_b = (-1, -1, -1);
         }
         out.push_str("\x1b[0m\x1b[?2026l");
         out
@@ -219,12 +245,17 @@ fn grid(list: &[Variant], max_cols: usize, w: usize, h: usize) -> (i32, Vec<(usi
     (s, out)
 }
 
-fn layout(mode: Mode, w: usize, h: usize, sel: usize) -> (i32, Vec<(usize, i32, i32)>) {
+fn layout(mode: Mode, w: usize, h: usize, sel: usize, hud: bool) -> (i32, Vec<(usize, i32, i32)>) {
     match mode {
         Mode::Focus => {
-            let s = odd_clamp((w as i32 - 2).min((h as i32 - 6) * 2), 9, 73);
+            let (avail_h, y0) = if hud {
+                (h.saturating_sub(4), 2)
+            } else {
+                (h, 0)
+            };
+            let s = odd_clamp((w as i32).min(avail_h as i32 * 2), 9, 73);
             let x0 = ((w as i32 - s) / 2).max(0);
-            let y0 = 1 + ((h as i32 - 2 - s / 2) / 2).max(0);
+            let y0 = y0.max(0) + (avail_h as i32 - s / 2).max(0) / 2;
             (s, vec![(sel, x0, y0)])
         }
         Mode::Grid4 => grid(&FEATURED, 4, w, h),
@@ -247,7 +278,7 @@ fn mode_label(mode: Mode, sel: usize) -> String {
 
 fn help_text(w: usize, paused: bool, auto: bool) -> String {
     let full = format!(
-        " 1-8 pick  arrows cycle  g grid  f focus  space {}  a auto-state {}  q quit ",
+        " 1-8 pick  arrows cycle  g grid  f focus  h hud  b bg  F11 full  space {}  a auto-state {}  q quit ",
         if paused { "resume" } else { "pause" },
         if auto { "on" } else { "off" }
     );
@@ -303,39 +334,65 @@ fn main() {
     let _ = out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[2J");
     let _ = out.flush();
 
+    let (wtx, wrx) = mpsc::sync_channel::<String>(1);
+    std::thread::spawn(move || {
+        let so = std::io::stdout();
+        let mut lock = so.lock();
+        while let Ok(buf) = wrx.recv() {
+            if lock.write_all(buf.as_bytes()).is_err() {
+                break;
+            }
+            let _ = lock.flush();
+        }
+    });
+
     let (tx, rx) = mpsc::channel::<Key>();
     std::thread::spawn(move || {
         let mut pending: Vec<u8> = Vec::new();
         loop {
             let b = term::read_byte();
             if b == 0 {
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(Duration::from_millis(2));
                 continue;
             }
-            if !pending.is_empty() {
-                if b == b'[' || b == b'O' {
-                    pending.push(b);
+            if b == 0x1b {
+                pending.clear();
+                pending.push(b);
+                continue;
+            }
+            if pending.first() == Some(&0x1b) {
+                if pending.len() == 1 {
+                    if b == b'[' || b == b'O' {
+                        pending.push(b);
+                    } else {
+                        pending.clear();
+                    }
                     continue;
                 }
-                let seq: Vec<u8> = std::mem::take(&mut pending);
-                let key = match b {
-                    b'A' => Some(Key::Up),
-                    b'B' => Some(Key::Down),
-                    b'C' => Some(Key::Right),
-                    b'D' => Some(Key::Left),
-                    _ => None,
-                };
-                if seq.first() == Some(&0x1b) {
+                if (0x40..=0x7e).contains(&b) {
+                    let seq: Vec<u8> = std::mem::take(&mut pending);
+                    let key = match (seq[1], b) {
+                        (b'[', b'A') => Some(Key::Up),
+                        (b'[', b'B') => Some(Key::Down),
+                        (b'[', b'C') => Some(Key::Right),
+                        (b'[', b'D') => Some(Key::Left),
+                        (b'[', b'~') => match seq.get(2) {
+                            Some(23) => Some(Key::F11),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
                     if let Some(k) = key {
                         if tx.send(k).is_err() {
                             return;
                         }
                     }
+                } else {
+                    pending.push(b);
+                    if pending.len() > 24 {
+                        pending.clear();
+                    }
                 }
-                continue;
-            }
-            if b == 0x1b {
-                pending.push(b);
                 continue;
             }
             let k = Key::Char(b);
@@ -350,6 +407,9 @@ fn main() {
     let mut sel = 0usize;
     let mut paused = false;
     let mut auto = false;
+    let mut hud = true;
+    let mut bg_idx = 0usize;
+    let mut fullscreen = false;
     let mut auto_next = Instant::now() + Duration::from_millis(2200);
     let mut rng = Rng::new(0xA11C_E001_7BEE_7A11);
     let mut units: Vec<Unit> = Vec::new();
@@ -392,6 +452,15 @@ fn main() {
                 }
                 Key::Char(b' ') => paused = !paused,
                 Key::Char(b'a') => auto = !auto,
+                Key::Char(b'h') => hud = !hud,
+                Key::Char(b'b') => {
+                    bg_idx = (bg_idx + 1) % BG_CYCLE.len();
+                    screen.set_bg(BG_CYCLE[bg_idx]);
+                }
+                Key::F11 => {
+                    fullscreen = !fullscreen;
+                    term::set_fullscreen(fullscreen);
+                }
                 Key::Char(b'[') => sel = if sel == 0 { ALL.len() - 1 } else { sel - 1 },
                 Key::Char(b']') => {
                     sel = (sel + 1) % ALL.len();
@@ -407,6 +476,7 @@ fn main() {
                 _ => {}
             }
             if quit {
+                term::set_fullscreen(false);
                 term::raw_stop(&saved);
                 let _ = out.write_all(b"\x1b[?25h\x1b[0m\x1b[?1049l");
                 let _ = out.flush();
@@ -443,7 +513,7 @@ fn main() {
             prev_h = h;
             touched = true;
         }
-        let (s, places) = layout(mode, w, h, sel);
+        let (s, places) = layout(mode, w, h, sel, hud);
         let list: Vec<Variant> = match mode {
             Mode::Focus => vec![ALL[sel]],
             Mode::Grid4 => FEATURED.to_vec(),
@@ -477,17 +547,18 @@ fn main() {
 
         if paused && !rebuilt {
             if touched {
-                screen.clear_row(0);
-                screen.text(0, 0, &header, 255);
-                if mode == Mode::Focus {
-                    screen.clear_row(h - 2);
-                    screen.text(1, h as i32 - 2, ALL[sel].name(), 255);
+                if hud {
+                    screen.clear_row(0);
+                    screen.text(0, 0, &header, 255);
+                    if mode == Mode::Focus {
+                        screen.clear_row(h - 2);
+                        screen.text(1, h as i32 - 2, ALL[sel].name(), 255);
+                    }
+                    screen.clear_row(h - 1);
+                    screen.text(0, h as i32 - 1, &help_text(w, paused, auto), 235);
                 }
-                screen.clear_row(h - 1);
-                screen.text(0, h as i32 - 1, &help_text(w, paused, auto), 100);
                 let buf = screen.render();
-                let _ = out.write_all(buf.as_bytes());
-                let _ = out.flush();
+                let _ = wtx.try_send(buf);
             }
             std::thread::sleep(Duration::from_millis(33));
             continue;
@@ -533,21 +604,22 @@ fn main() {
                     screen.half(*x + i as i32, *y + j as i32, t0, b0);
                 }
             }
-            if mode != Mode::Focus {
-                let v = if u.sel { 255 } else { 110 };
+            if hud && mode != Mode::Focus {
+                let v = if u.sel { 255 } else { 220 };
                 screen.text(*x, *y + rows as i32, &u.label, v);
             }
         }
 
-        screen.text(0, 0, &header, 255);
-        if mode == Mode::Focus {
-            screen.text(1, h as i32 - 2, ALL[sel].name(), 255);
+        if hud {
+            screen.text(0, 0, &header, 255);
+            if mode == Mode::Focus {
+                screen.text(1, h as i32 - 2, ALL[sel].name(), 255);
+            }
+            screen.text(0, h as i32 - 1, &help_text(w, paused, auto), 235);
         }
-        screen.text(0, h as i32 - 1, &help_text(w, paused, auto), 100);
 
         let buf = screen.render();
-        let _ = out.write_all(buf.as_bytes());
-        let _ = out.flush();
+        let _ = wtx.try_send(buf);
 
         let spent = now.elapsed();
         if spent < Duration::from_millis(33) {

@@ -56,6 +56,8 @@ mod imp {
         }
     }
 
+    pub fn set_fullscreen(_on: bool) {}
+
     pub fn size() -> (usize, usize) {
         unsafe {
             let mut ws = Winsize::default();
@@ -115,6 +117,7 @@ mod imp {
         fn SetConsoleMode(h: *mut c_void, m: u32) -> i32;
         fn SetConsoleOutputCP(cp: u32) -> i32;
         fn GetConsoleScreenBufferInfo(h: *mut c_void, i: *mut Info) -> i32;
+        fn SetConsoleDisplayMode(h: *mut c_void, m: u32) -> i32;
     }
 
     extern "C" {
@@ -136,8 +139,20 @@ mod imp {
             GetConsoleMode(hin, &mut im);
             SetConsoleOutputCP(65001);
             SetConsoleMode(hout, om | 0x0004);
-            SetConsoleMode(hin, (im & !(0x0002 | 0x0008)) | 0x0200);
+            const LINE_INPUT: u32 = 0x0002;
+            const ECHO_INPUT: u32 = 0x0008;
+            const QUICK_EDIT: u32 = 0x0040;
+            const EXTENDED_FLAGS: u32 = 0x0080;
+            const VT_INPUT: u32 = 0x0200;
+            let raw = (im & !(LINE_INPUT | ECHO_INPUT | QUICK_EDIT)) | EXTENDED_FLAGS | VT_INPUT;
+            SetConsoleMode(hin, raw);
             Saved { out: om, inp: im }
+        }
+    }
+
+    pub fn set_fullscreen(on: bool) {
+        unsafe {
+            SetConsoleDisplayMode(GetStdHandle(-11), if on { 1 } else { 2 });
         }
     }
 
@@ -167,6 +182,9 @@ mod imp {
             let c = _getch();
             if c < 0 {
                 0
+            } else if c == 0 {
+                let _ = _getch();
+                0
             } else {
                 c as u8
             }
@@ -174,4 +192,4 @@ mod imp {
     }
 }
 
-pub use imp::{raw_start, raw_stop, read_byte, size};
+pub use imp::{raw_start, raw_stop, read_byte, set_fullscreen, size};
