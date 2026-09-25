@@ -325,6 +325,7 @@ pub struct Solid {
     pub ox: f64,
     pub oy: f64,
     pub rot_z: f64,
+    pub corner_r: f64,
 }
 
 impl Solid {
@@ -339,6 +340,7 @@ impl Solid {
             ox: 0.0,
             oy: 0.0,
             rot_z: 0.0,
+            corner_r: 0.0,
         }
     }
 }
@@ -416,4 +418,24 @@ pub fn draw_solid(cv: &mut Canvas, s: &Solid) {
 
     cv.tri([p3(&front, 0), p3(&front, 1), p3(&front, 2)], 255);
     cv.tri([p3(&front, 3), p3(&front, 4), p3(&front, 5)], 255);
+
+    if s.corner_r > 0.001 {
+        for f in front.iter() {
+            let r = (s.corner_r * cv.r * CAM / (CAM - f.2)).max(1.0);
+            let r2 = r * r;
+            let x0 = (f.0 - r).floor().max(0.0) as i32;
+            let x1 = (f.0 + r).ceil().min(cv.n as f64 - 1.0) as i32;
+            let y0 = (f.1 - r).floor().max(0.0) as i32;
+            let y1 = (f.1 + r).ceil().min(cv.n as f64 - 1.0) as i32;
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let dx = x as f64 + 0.5 - f.0;
+                    let dy = y as f64 + 0.5 - f.1;
+                    if dx * dx + dy * dy <= r2 {
+                        cv.px[(y * cv.n + x) as usize] = 255;
+                    }
+                }
+            }
+        }
+    }
 }

@@ -68,6 +68,7 @@ fn coin_face(cv: &mut Canvas, t: f64, ox: f64, oy: f64) {
             wob_gain: 0.0,
             ox,
             oy,
+            corner_r: 0.1,
             ..Solid::base(t)
         },
     );
@@ -261,21 +262,27 @@ fn main() {
             scan_prog = (scan_prog + dt / T_SWEEP).min(1.0);
         }
         let spin_target = if phase == Phase::Idle { 1.0 } else { 0.0 };
-        spin_env += (spin_target - spin_env) * (1.0 - (-dt / 0.3).exp());
+        let env_tau = if phase == Phase::Returning { 0.15 } else { 0.3 };
+        spin_env += (spin_target - spin_env) * (1.0 - (-dt / env_tau).exp());
         let park_target = match phase {
             Phase::Hold if parked => 1.0,
             Phase::Returning | Phase::Production => 1.0,
             _ => 0.0,
         };
-        park_env += (park_target - park_env) * (1.0 - (-dt / 0.25).exp());
+        let park_tau = if phase == Phase::Returning {
+            0.15
+        } else {
+            0.25
+        };
+        park_env += (park_target - park_env) * (1.0 - (-dt / park_tau).exp());
         if phase == Phase::Idle {
             let cruise = angle_rate(coin_angle);
             spin_vel += (cruise - spin_vel) * (1.0 - (-dt / 0.25).exp());
             coin_angle += spin_vel * dt;
         } else if phase == Phase::Returning {
             let target = (coin_angle / PI).round() * PI;
-            let servo = ((target - coin_angle) * 4.0).clamp(-8.0, 8.0);
-            spin_vel += (servo - spin_vel) * (1.0 - (-dt / 0.15).exp());
+            let servo = ((target - coin_angle) * 12.0).clamp(-14.0, 14.0);
+            spin_vel += (servo - spin_vel) * (1.0 - (-dt / 0.1).exp());
             coin_angle += spin_vel * dt;
             if (coin_angle - target).abs() < 0.03
                 && spin_vel.abs() < 0.6
@@ -377,6 +384,7 @@ fn main() {
                         angle: Some(coin_angle),
                         rim_gain: 1.0,
                         wob_gain: spin_env,
+                        corner_r: 0.1,
                         ox: spin_env * IDLE_R * wt.cos(),
                         oy: spin_env * IDLE_R * wt.sin() + park_env * PARK_Y,
                         ..Solid::base(t)
