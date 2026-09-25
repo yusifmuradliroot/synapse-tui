@@ -78,8 +78,25 @@ impl Screen {
         }
     }
 
-    pub fn render(&self) -> String {
-        let mut out = String::with_capacity(self.w * self.h * 6);
+    pub fn hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for v in self.top.iter().chain(self.bot.iter()) {
+            h ^= *v as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        for c in self.ch.iter() {
+            h ^= *c as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        for v in [self.bg.0, self.bg.1, self.bg.2] {
+            h ^= v as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    pub fn render_into(&self, out: &mut String) {
+        out.clear();
         out.push_str("\x1b[?2026h\x1b[H");
         let bg = self.bg;
         let mut last_f: (i32, i32, i32) = (-1, -1, -1);
@@ -125,6 +142,11 @@ impl Screen {
             last_b = (-1, -1, -1);
         }
         out.push_str("\x1b[0m\x1b[?2026l");
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::with_capacity(self.w * self.h * 6);
+        self.render_into(&mut out);
         out
     }
 }

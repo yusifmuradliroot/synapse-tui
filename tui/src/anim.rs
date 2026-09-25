@@ -165,11 +165,11 @@ pub fn draw(cv: &mut Canvas, v: Variant, cell: &mut Cell, env: &mut Env) {
             }
         }
         Variant::CoinX => {
-            draw_solid(cv, t, true, env.dark_bg, None);
+            draw_solid(cv, t, true, env.dark_bg, None, 1.0);
             return;
         }
         Variant::CoinY => {
-            draw_solid(cv, t, false, env.dark_bg, None);
+            draw_solid(cv, t, false, env.dark_bg, None, 1.0);
             return;
         }
         _ => {}

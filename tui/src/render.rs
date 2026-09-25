@@ -251,7 +251,14 @@ pub fn draw_pass(cv: &mut Canvas, p: &Pass) {
     }
 }
 
-pub fn draw_solid(cv: &mut Canvas, t: f64, axis_x: bool, dark_bg: bool, angle: Option<f64>) {
+pub fn draw_solid(
+    cv: &mut Canvas,
+    t: f64,
+    axis_x: bool,
+    dark_bg: bool,
+    angle: Option<f64>,
+    rim_gain: f64,
+) {
     let auto = t * 1.5;
     let mut a = match angle {
         Some(v) => v,
@@ -286,11 +293,13 @@ pub fn draw_solid(cv: &mut Canvas, t: f64, axis_x: bool, dark_bg: bool, angle: O
     let back: Vec<(f64, f64, f64)> = SOLID_PTS.iter().map(|p| proj(mv(*p, -HD))).collect();
 
     let p3 = |v: &Vec<(f64, f64, f64)>, i: usize| (v[i].0, v[i].1);
-    if dark_bg {
-        cv.tri([p3(&back, 0), p3(&back, 1), p3(&back, 2)], 55);
-        cv.tri([p3(&back, 3), p3(&back, 4), p3(&back, 5)], 55);
+    let gain = rim_gain.clamp(0.0, 1.0);
+    if gain > 0.02 && dark_bg {
+        let back_v = (55.0 * gain) as u8;
+        cv.tri([p3(&back, 0), p3(&back, 1), p3(&back, 2)], back_v);
+        cv.tri([p3(&back, 3), p3(&back, 4), p3(&back, 5)], back_v);
     }
-    let rim = if dark_bg { &RIM_SH } else { &RIM_SH_BRIGHT };
+    let rim: [u8; 6] = if dark_bg { RIM_SH } else { RIM_SH_BRIGHT };
 
     type Quad = (f64, [(f64, f64); 4], u8);
     let mut quads: Vec<Quad> = Vec::with_capacity(18);
@@ -303,7 +312,9 @@ pub fn draw_solid(cv: &mut Canvas, t: f64, axis_x: bool, dark_bg: bool, angle: O
             (back[i].0, back[i].1),
         ];
         let z = (front[i].2 + front[j].2 + back[i].2 + back[j].2) / 4.0;
-        quads.push((z, pts, rim[n % 6]));
+        let base = rim[n % 6] as f64;
+        let v = (255.0 - (255.0 - base) * gain).round() as u8;
+        quads.push((z, pts, v));
     }
     quads.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     for (_, pts, v) in quads {
