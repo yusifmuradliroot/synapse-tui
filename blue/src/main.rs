@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 1;
+const HOTFIX: u32 = 2;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
@@ -191,6 +191,9 @@ fn main() {
             }
         }
         screen.text(0, 0, &vlabel, 255);
+        screen.text(0, h as i32 - 3, "1-Restart from 0 to all", 255);
+        screen.text(0, h as i32 - 2, "2-Idle", 255);
+        screen.text(0, h as i32 - 1, "3-Production", 255);
         let buf = screen.render();
         let _ = out.write_all(buf.as_bytes());
         let _ = out.flush();
