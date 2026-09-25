@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 1;
+const HOTFIX: u32 = 0;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
@@ -150,6 +150,7 @@ fn main() {
     screen.set_bg(BG_FULL_BLUE);
     let mut last_size = (0usize, 0usize);
     let mut cv = Canvas::new(73);
+    cv.aa = 2;
     let mut phase = Phase::Blank;
     let mut pt = 0.0f64;
     let mut scan_prog = 0.0f64;
@@ -264,6 +265,7 @@ fn main() {
         }
         if n != cv.n {
             cv = Canvas::new_exact(n);
+            cv.aa = 2;
         }
         let nf = n as f64;
         let sweep = -14.0 + (nf + 28.0) * scan_prog;

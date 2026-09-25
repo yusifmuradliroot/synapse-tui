@@ -95,7 +95,10 @@ pub struct Canvas {
     pub cy: f64,
     pub r: f64,
     pub px: Vec<u8>,
+    pub aa: u8,
 }
+
+const SUB: [(f64, f64); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
 
 impl Canvas {
     pub fn new(n: i32) -> Canvas {
@@ -106,6 +109,7 @@ impl Canvas {
             cy: (n as f64 - 1.0) / 2.0,
             r: n as f64 * 20.0 / 73.0,
             px: vec![0; (n * n) as usize],
+            aa: 1,
         }
     }
 
@@ -117,6 +121,7 @@ impl Canvas {
             cy: (n as f64 - 1.0) / 2.0,
             r: n as f64 * 20.0 / 73.0,
             px: vec![0; (n * n) as usize],
+            aa: 1,
         }
     }
 
@@ -149,8 +154,24 @@ impl Canvas {
         let iy1 = (y1.ceil() as i32).min(self.n - 1);
         for y in iy0..=iy1 {
             for x in ix0..=ix1 {
-                if test(x as f64 + 0.5, y as f64 + 0.5, p) {
-                    self.px[(y * self.n + x) as usize] = v;
+                let idx = (y * self.n + x) as usize;
+                if self.aa <= 1 {
+                    if test(x as f64 + 0.5, y as f64 + 0.5, p) {
+                        self.px[idx] = v;
+                    }
+                } else {
+                    let mut hits = 0u32;
+                    for (dx, dy) in SUB {
+                        if test(x as f64 + dx, y as f64 + dy, p) {
+                            hits += 1;
+                        }
+                    }
+                    if hits > 0 {
+                        let nv = (v as u32 * hits / 4) as u8;
+                        if nv > self.px[idx] {
+                            self.px[idx] = nv;
+                        }
+                    }
                 }
             }
         }
@@ -266,10 +287,29 @@ pub fn draw_pass(cv: &mut Canvas, p: &Pass) {
                 px
             };
             let tri = [ru, rd];
-            if !tri.iter().any(|t| point_in_tri(qx, py, t)) {
-                continue;
+            let idx = (y * cv.n + x) as usize;
+            if cv.aa <= 1 {
+                if !tri.iter().any(|t| point_in_tri(qx, py, t)) {
+                    continue;
+                }
+                cv.px[idx] = 255;
+            } else {
+                let mut hits = 0u32;
+                for (dx, dy) in SUB {
+                    let sx = x as f64 + dx;
+                    let sy = y as f64 + dy;
+                    if tri.iter().any(|t| point_in_tri(sx, sy, t)) {
+                        hits += 1;
+                    }
+                }
+                if hits == 0 {
+                    continue;
+                }
+                let nv = (255 * hits / 4) as u8;
+                if nv > cv.px[idx] {
+                    cv.px[idx] = nv;
+                }
             }
-            cv.px[(y * cv.n + x) as usize] = 255;
         }
     }
 }
