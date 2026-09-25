@@ -10,19 +10,21 @@ mod term;
 
 use render::{Canvas, Fx, Pass, Solid};
 use screen::{Screen, BG_FULL_BLUE};
+use std::f64::consts::PI;
 use std::io::Write;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 0;
+const HOTFIX: u32 = 1;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
 const T_SWEEP: f64 = 2.5;
 const T_HOLD: f64 = 0.5;
 const T_HOLD2IDLE: f64 = 1.5;
+const T_RETURN: f64 = 1.2;
 const IDLE_R: f64 = 0.08;
 const IDLE_W: f64 = 1.25663706144;
 const FRAME: Duration = Duration::from_micros(16_667);
@@ -34,10 +36,16 @@ enum Phase {
     ScanFill,
     Hold,
     Idle,
+    Returning,
 }
 
 fn angle_rate(a: f64) -> f64 {
     1.5 * (0.5 + (1.0 - a.cos().abs()))
+}
+
+fn ease(p: f64) -> f64 {
+    let p = p.clamp(0.0, 1.0);
+    p * p * (3.0 - 2.0 * p)
 }
 
 fn mirror_x(cv: &mut Canvas) {
@@ -87,6 +95,11 @@ fn main() {
     let mut scan_prog = 0.0f64;
     let mut coin_angle = 0.0f64;
     let mut hold_auto = false;
+    let mut ret_angle = 0.0f64;
+    let mut ret_ox = 0.0f64;
+    let mut ret_oy = 0.0f64;
+    let mut cur_ox = 0.0f64;
+    let mut cur_oy = 0.0f64;
     let mut frame_no = 0u32;
     let mut last = Instant::now();
     let t0 = last;
@@ -96,10 +109,19 @@ fn main() {
             if b == b'2' && phase != Phase::Idle {
                 phase = Phase::Idle;
                 pt = 0.0;
-            } else if b == b'0' && phase != Phase::Hold {
-                phase = Phase::Hold;
-                pt = 0.0;
-                hold_auto = false;
+            } else if b == b'0' {
+                if phase == Phase::Idle {
+                    ret_angle = coin_angle;
+                    ret_ox = cur_ox;
+                    ret_oy = cur_oy;
+                    phase = Phase::Returning;
+                    pt = 0.0;
+                    hold_auto = false;
+                } else if phase != Phase::Hold {
+                    phase = Phase::Hold;
+                    pt = 0.0;
+                    hold_auto = false;
+                }
             } else if b == b'q' || b == 0x1b || b == 3 {
                 term::raw_stop(&saved);
                 let _ = out.write_all(b"\x1b[?25h\x1b[0m\x1b[?1049l");
@@ -125,6 +147,7 @@ fn main() {
             Phase::Scan if scan_prog >= 1.0 => phase = Phase::ScanFill,
             Phase::ScanFill if scan_prog >= 1.0 && pt >= T_SWEEP + T_HOLD => phase = Phase::Hold,
             Phase::Hold if hold_auto && pt >= T_HOLD2IDLE => phase = Phase::Idle,
+            Phase::Returning if pt >= T_RETURN => phase = Phase::Hold,
             _ => {}
         }
         if prev != phase {
@@ -141,9 +164,22 @@ fn main() {
         }
         if phase == Phase::Idle {
             coin_angle += angle_rate(coin_angle) * dt;
+            let wt = t * IDLE_W;
+            cur_ox = IDLE_R * wt.cos();
+            cur_oy = IDLE_R * wt.sin();
+        } else if phase == Phase::Returning {
+            let k = ease(pt / T_RETURN);
+            let target = (ret_angle / PI).round() * PI;
+            coin_angle = ret_angle + (target - ret_angle) * k;
+        } else {
+            cur_ox = 0.0;
+            cur_oy = 0.0;
         }
 
-        let animated = phase == Phase::Scan || phase == Phase::ScanFill || phase == Phase::Idle;
+        let animated = phase == Phase::Scan
+            || phase == Phase::ScanFill
+            || phase == Phase::Idle
+            || phase == Phase::Returning;
         if !animated && !resized && prev == phase {
             std::thread::sleep(Duration::from_millis(30));
             continue;
@@ -193,14 +229,29 @@ fn main() {
                 mirror_x(&mut cv);
             }
             Phase::Idle => {
-                let wt = t * IDLE_W;
                 render::draw_solid(
                     &mut cv,
                     &Solid {
                         t,
                         angle: Some(coin_angle),
-                        ox: IDLE_R * wt.cos(),
-                        oy: IDLE_R * wt.sin(),
+                        ox: cur_ox,
+                        oy: cur_oy,
+                        ..Solid::base(t)
+                    },
+                );
+            }
+            Phase::Returning => {
+                let k = ease(pt / T_RETURN);
+                let g = 1.0 - k;
+                render::draw_solid(
+                    &mut cv,
+                    &Solid {
+                        t,
+                        angle: Some(coin_angle),
+                        rim_gain: g,
+                        wob_gain: g,
+                        ox: ret_ox * (1.0 - k),
+                        oy: ret_oy * (1.0 - k),
                         ..Solid::base(t)
                     },
                 );
