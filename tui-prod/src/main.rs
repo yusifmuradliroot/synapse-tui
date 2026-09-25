@@ -228,6 +228,7 @@ fn main() {
     let mut disp = 0.0f64;
     let mut coin_angle = 0.0f64;
     let mut enter_angle = 0.0f64;
+    let mut scan_prog = 0.0f64;
     let mut wheel_th = 0.0f64;
     let mut flat = false;
     let mut prev_pt = 0.0f64;
@@ -262,6 +263,7 @@ fn main() {
                     phase = Phase::Blank;
                     pt = 0.0;
                     prev_pt = 0.0;
+                    scan_prog = 0.0;
                     coin_angle = 0.0;
                     wheel_th = 0.0;
                     flat = false;
@@ -373,14 +375,17 @@ fn main() {
         let prev_phase = phase;
         match phase {
             Phase::Blank if pt >= T_BLANK => phase = Phase::Scan,
-            Phase::Scan if pt >= T_SWEEP => phase = Phase::ScanFill,
-            Phase::ScanFill if pt >= T_SCANFILL => phase = Phase::CoinY,
+            Phase::Scan if scan_prog >= 1.0 => phase = Phase::ScanFill,
+            Phase::ScanFill if scan_prog >= 1.0 && pt >= T_SCANFILL => phase = Phase::CoinY,
             _ => {}
         }
         if prev_phase != phase {
             xfade = Some((cv.px.clone(), 0.0));
             pt = 0.0;
             prev_pt = 0.0;
+            if phase == Phase::Scan || phase == Phase::ScanFill {
+                scan_prog = 0.0;
+            }
         }
 
         if paused && !touched && !resized {
@@ -388,6 +393,9 @@ fn main() {
             continue;
         }
 
+        if !paused && (phase == Phase::Scan || phase == Phase::ScanFill) {
+            scan_prog = (scan_prog + dt / T_SWEEP).min(1.0);
+        }
         if !paused {
             match phase {
                 Phase::CoinY => {
@@ -422,7 +430,7 @@ fn main() {
                 p.th_u = 0.0;
                 p.th_d = 0.0;
                 p.fx = Fx::Scan;
-                p.scan = sweep(pt / T_SWEEP);
+                p.scan = sweep(scan_prog);
                 render::draw_pass(&mut cv, &p);
             }
             Phase::ScanFill => {
@@ -430,7 +438,7 @@ fn main() {
                 p.th_u = 0.0;
                 p.th_d = 0.0;
                 p.fx = Fx::ScanFill;
-                p.scan = sweep(pt / T_SWEEP);
+                p.scan = sweep(scan_prog);
                 render::draw_pass(&mut cv, &p);
             }
             Phase::CoinY => {
