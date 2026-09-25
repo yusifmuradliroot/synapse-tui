@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 1;
+const HOTFIX: u32 = 0;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
@@ -164,7 +164,8 @@ fn main() {
     let mut park_env = 0.0f64;
     let mut prod_wheel = 0.0f64;
     let mut prod_wvel = 0.0f64;
-    let mut prod_stop: Option<Phase> = None;
+    let mut prod_stop: Option<(Phase, f64, f64)> = None;
+    let mut stop_t = 0.0f64;
     let mut hold_auto = false;
     let mut frame_no = 0u32;
     let mut last = Instant::now();
@@ -172,9 +173,29 @@ fn main() {
 
     loop {
         while let Ok(b) = rx.try_recv() {
-            if b == b'2' && phase != Phase::Idle {
-                phase = Phase::Idle;
+            if b == b'1' {
+                phase = Phase::Blank;
                 pt = 0.0;
+                scan_prog = 0.0;
+                coin_angle = 0.0;
+                spin_vel = 0.0;
+                spin_env = 0.0;
+                park_env = 0.0;
+                parked = false;
+                hold_auto = false;
+                prod_wheel = 0.0;
+                prod_wvel = 0.0;
+                prod_stop = None;
+            } else if b == b'2' && phase != Phase::Idle {
+                if phase == Phase::Production {
+                    let yaw_t = (coin_angle / PI).round() * PI;
+                    let wheel_t = (prod_wheel / (PI / 3.0)).round() * (PI / 3.0);
+                    prod_stop = Some((Phase::Idle, yaw_t, wheel_t));
+                    stop_t = 0.0;
+                } else {
+                    phase = Phase::Idle;
+                    pt = 0.0;
+                }
             } else if b == b'3' && phase != Phase::Production {
                 phase = Phase::Production;
                 pt = 0.0;
@@ -183,7 +204,10 @@ fn main() {
                 prod_stop = None;
             } else if b == b'0' {
                 if phase == Phase::Production {
-                    prod_stop = Some(Phase::Hold);
+                    let yaw_t = (coin_angle / PI).round() * PI;
+                    let wheel_t = (prod_wheel / (PI / 3.0)).round() * (PI / 3.0);
+                    prod_stop = Some((Phase::Hold, yaw_t, wheel_t));
+                    stop_t = 0.0;
                     parked = true;
                 } else if phase == Phase::Idle {
                     phase = Phase::Returning;
@@ -264,22 +288,22 @@ fn main() {
                 pt = 0.0;
             }
         } else if phase == Phase::Production {
-            if let Some(target_phase) = prod_stop {
-                let face_target = (coin_angle / PI).round() * PI;
-                let yaw_servo = ((face_target - coin_angle) * 4.0).clamp(-8.0, 8.0);
+            if let Some((target_phase, yaw_t, wheel_t)) = prod_stop {
+                stop_t += dt;
+                let yaw_servo = ((yaw_t - coin_angle) * 4.0).clamp(-8.0, 8.0);
                 spin_vel += (yaw_servo - spin_vel) * (1.0 - (-dt / 0.15).exp());
                 coin_angle += spin_vel * dt;
-                let sym_target = (prod_wheel / (PI / 3.0)).round() * (PI / 3.0);
-                let wheel_servo = ((sym_target - prod_wheel) * 4.0).clamp(-8.0, 8.0);
+                let wheel_servo = ((wheel_t - prod_wheel) * 4.0).clamp(-8.0, 8.0);
                 prod_wvel += (wheel_servo - prod_wvel) * (1.0 - (-dt / 0.15).exp());
                 prod_wheel += prod_wvel * dt;
-                if (coin_angle - face_target).abs() < 0.03
+                if ((coin_angle - yaw_t).abs() < 0.03
                     && spin_vel.abs() < 0.6
-                    && (prod_wheel - sym_target).abs() < 0.05
-                    && prod_wvel.abs() < 1.0
+                    && (prod_wheel - wheel_t).abs() < 0.05
+                    && prod_wvel.abs() < 1.0)
+                    || stop_t > 2.5
                 {
-                    coin_angle = face_target;
-                    prod_wheel = sym_target;
+                    coin_angle = yaw_t;
+                    prod_wheel = wheel_t;
                     spin_vel = 0.0;
                     prod_wvel = 0.0;
                     prod_stop = None;
