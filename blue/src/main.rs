@@ -95,7 +95,7 @@ fn main() {
             symmetrize(&mut cv);
             let bx = (w as i32 - cv.n) / 2;
             let rows = (cv.n + 1) / 2;
-            let by = 1 + (h as i32 - 2 - rows).max(0) / 2;
+            let by = 1 + (h as i32 - 2 - rows) / 2;
             screen.reset(w, h);
             for j in 0..rows {
                 let y0 = 2 * j;
