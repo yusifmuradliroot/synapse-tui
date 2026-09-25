@@ -114,6 +114,7 @@ fn main() {
                     screen.half(bx + i, by + j, t, b);
                 }
             }
+            screen.text(0, 0, &format!("v{VERSION}"), 255);
             let buf = screen.render();
             let _ = out.write_all(buf.as_bytes());
             let _ = out.flush();
