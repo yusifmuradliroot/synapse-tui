@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 0;
+const HOTFIX: u32 = 1;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
@@ -70,26 +70,40 @@ fn coin_face(cv: &mut Canvas, t: f64, ox: f64, oy: f64) {
     );
 }
 
-fn bevel_edge(cv: &mut Canvas, v: u8) {
+fn bevel_edge(cv: &mut Canvas, outer: u8, inner: u8) {
     let n = cv.n;
     let src = cv.px.clone();
-    let at = |x: i32, y: i32| -> u8 {
+    let at = |buf: &[u8], x: i32, y: i32| -> u8 {
         if x < 0 || y < 0 || x >= n || y >= n {
             0
         } else {
-            src[(y * n + x) as usize]
+            buf[(y * n + x) as usize]
         }
     };
     for y in 0..n {
         for x in 0..n {
             let i = (y * n + x) as usize;
             if src[i] == 255
-                && (at(x - 1, y) != 255
-                    || at(x + 1, y) != 255
-                    || at(x, y - 1) != 255
-                    || at(x, y + 1) != 255)
+                && (at(&src, x - 1, y) != 255
+                    || at(&src, x + 1, y) != 255
+                    || at(&src, x, y - 1) != 255
+                    || at(&src, x, y + 1) != 255)
             {
-                cv.px[i] = v;
+                cv.px[i] = outer;
+            }
+        }
+    }
+    let mid = cv.px.clone();
+    for y in 0..n {
+        for x in 0..n {
+            let i = (y * n + x) as usize;
+            if mid[i] == 255
+                && (at(&mid, x - 1, y) == outer
+                    || at(&mid, x + 1, y) == outer
+                    || at(&mid, x, y - 1) == outer
+                    || at(&mid, x, y + 1) == outer)
+            {
+                cv.px[i] = inner;
             }
         }
     }
@@ -260,18 +274,18 @@ fn main() {
                 let r = cv.r;
                 coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
                 clip_y(&mut cv, sweep - 0.4 * r, sweep);
-                bevel_edge(&mut cv, 220);
+                bevel_edge(&mut cv, 205, 232);
                 mirror_x(&mut cv);
             }
             Phase::ScanFill => {
                 coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
                 clip_y(&mut cv, f64::MIN, sweep + 7.0);
-                bevel_edge(&mut cv, 220);
+                bevel_edge(&mut cv, 205, 232);
                 mirror_x(&mut cv);
             }
             Phase::Hold => {
                 coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
-                bevel_edge(&mut cv, 220);
+                bevel_edge(&mut cv, 205, 232);
                 mirror_x(&mut cv);
             }
             Phase::Idle | Phase::Returning => {
@@ -288,7 +302,7 @@ fn main() {
                         ..Solid::base(t)
                     },
                 );
-                bevel_edge(&mut cv, 220);
+                bevel_edge(&mut cv, 205, 232);
             }
         }
         frame_no = frame_no.wrapping_add(1);
