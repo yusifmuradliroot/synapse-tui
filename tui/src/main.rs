@@ -159,7 +159,7 @@ impl Screen {
                     if t > 0 {
                         out.push_str(&format!("\x1b[38;2;{};{};{}m", fc.0, fc.1, fc.2));
                     } else {
-                        out.push_str("\x1b[39m");
+                        out.push_str(&format!("\x1b[38;2;{};{};{}m", bg.0, bg.1, bg.2));
                     }
                     last_f = fc;
                 }
