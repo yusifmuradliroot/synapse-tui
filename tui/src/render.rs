@@ -324,6 +324,7 @@ pub struct Solid {
     pub wob_gain: f64,
     pub ox: f64,
     pub oy: f64,
+    pub rot_z: f64,
 }
 
 impl Solid {
@@ -337,6 +338,7 @@ impl Solid {
             wob_gain: 1.0,
             ox: 0.0,
             oy: 0.0,
+            rot_z: 0.0,
         }
     }
 }
@@ -360,11 +362,13 @@ pub fn draw_solid(cv: &mut Canvas, s: &Solid) {
     let (cw, sw) = (wob.cos(), wob.sin());
     let (cw2, sw2) = (wob2.cos(), wob2.sin());
 
+    let (cz, sz) = (s.rot_z.cos(), s.rot_z.sin());
     let mv = |p: (f64, f64), z: f64| -> (f64, f64, f64) {
+        let (rx, ry) = (p.0 * cz - p.1 * sz, p.0 * sz + p.1 * cz);
         let (x, y, zz) = if axis_x {
-            (p.0, p.1 * ca + z * sa, -p.1 * sa + z * ca)
+            (rx, ry * ca + z * sa, -ry * sa + z * ca)
         } else {
-            (p.0 * ca + z * sa, p.1, -p.0 * sa + z * ca)
+            (rx * ca + z * sa, ry, -rx * sa + z * ca)
         };
         let y2 = y * cw - zz * sw;
         let z2 = y * sw + zz * cw;

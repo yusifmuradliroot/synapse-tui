@@ -10,7 +10,7 @@ mod term;
 
 use render::{Canvas, Solid};
 use screen::{Screen, BG_FULL_BLUE};
-use std::f64::consts::PI;
+use std::f64::consts::{PI, TAU};
 use std::io::Write;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -26,6 +26,8 @@ const T_HOLD: f64 = 0.5;
 const T_HOLD2IDLE: f64 = 1.5;
 const IDLE_R: f64 = 0.08;
 const PARK_Y: f64 = -0.15;
+const PROD_TILT: f64 = 0.18;
+const WHEEL_CRUISE: f64 = 2.2;
 const IDLE_W: f64 = 1.25663706144;
 const FRAME: Duration = Duration::from_micros(16_667);
 
@@ -37,6 +39,7 @@ enum Phase {
     Hold,
     Idle,
     Returning,
+    Production,
 }
 
 fn angle_rate(a: f64) -> f64 {
@@ -158,6 +161,9 @@ fn main() {
     let mut spin_vel = 0.0f64;
     let mut spin_env = 0.0f64;
     let mut park_env = 0.0f64;
+    let mut prod_wheel = 0.0f64;
+    let mut prod_wvel = 0.0f64;
+    let mut prod_stop: Option<Phase> = None;
     let mut hold_auto = false;
     let mut frame_no = 0u32;
     let mut last = Instant::now();
@@ -168,8 +174,16 @@ fn main() {
             if b == b'2' && phase != Phase::Idle {
                 phase = Phase::Idle;
                 pt = 0.0;
+            } else if b == b'3' && phase != Phase::Production {
+                phase = Phase::Production;
+                pt = 0.0;
+                prod_wheel = 0.0;
+                prod_wvel = 0.0;
+                prod_stop = None;
             } else if b == b'0' {
-                if phase == Phase::Idle {
+                if phase == Phase::Production {
+                    prod_stop = Some(Phase::Hold);
+                } else if phase == Phase::Idle {
                     phase = Phase::Returning;
                     pt = 0.0;
                     hold_auto = false;
@@ -220,7 +234,7 @@ fn main() {
         let spin_target = if phase == Phase::Idle { 1.0 } else { 0.0 };
         spin_env += (spin_target - spin_env) * (1.0 - (-dt / 0.3).exp());
         let park_target = match phase {
-            Phase::Hold | Phase::Returning => 1.0,
+            Phase::Hold | Phase::Returning | Phase::Production => 1.0,
             Phase::ScanFill if scan_prog >= 1.0 => 1.0,
             _ => 0.0,
         };
@@ -244,12 +258,47 @@ fn main() {
                 phase = Phase::Hold;
                 pt = 0.0;
             }
+        } else if phase == Phase::Production {
+            if let Some(target_phase) = prod_stop {
+                let face_target = (coin_angle / PI).round() * PI;
+                let yaw_servo = ((face_target - coin_angle) * 4.0).clamp(-8.0, 8.0);
+                spin_vel += (yaw_servo - spin_vel) * (1.0 - (-dt / 0.15).exp());
+                coin_angle += spin_vel * dt;
+                let sym_target = (prod_wheel / (PI / 3.0)).round() * (PI / 3.0);
+                let wheel_servo = ((sym_target - prod_wheel) * 4.0).clamp(-8.0, 8.0);
+                prod_wvel += (wheel_servo - prod_wvel) * (1.0 - (-dt / 0.15).exp());
+                prod_wheel += prod_wvel * dt;
+                if (coin_angle - face_target).abs() < 0.03
+                    && spin_vel.abs() < 0.6
+                    && (prod_wheel - sym_target).abs() < 0.05
+                    && prod_wvel.abs() < 1.0
+                {
+                    coin_angle = face_target;
+                    prod_wheel = sym_target;
+                    spin_vel = 0.0;
+                    prod_wvel = 0.0;
+                    prod_stop = None;
+                    phase = target_phase;
+                    pt = 0.0;
+                    if target_phase == Phase::Hold {
+                        hold_auto = false;
+                    }
+                }
+            } else {
+                let tilt_target = PROD_TILT + ((coin_angle - PROD_TILT) / TAU).round() * TAU;
+                let yaw_servo = ((tilt_target - coin_angle) * 4.0).clamp(-8.0, 8.0);
+                spin_vel += (yaw_servo - spin_vel) * (1.0 - (-dt / 0.15).exp());
+                coin_angle += spin_vel * dt;
+                prod_wvel += (WHEEL_CRUISE - prod_wvel) * (1.0 - (-dt / 0.4).exp());
+                prod_wheel += prod_wvel * dt;
+            }
         }
 
         let animated = phase == Phase::Scan
             || phase == Phase::ScanFill
             || phase == Phase::Idle
-            || phase == Phase::Returning;
+            || phase == Phase::Returning
+            || phase == Phase::Production;
         if !animated && !resized && prev == phase {
             std::thread::sleep(Duration::from_millis(30));
             continue;
@@ -301,6 +350,22 @@ fn main() {
                         wob_gain: spin_env,
                         ox: spin_env * IDLE_R * wt.cos(),
                         oy: spin_env * IDLE_R * wt.sin() + park_env * PARK_Y,
+                        ..Solid::base(t)
+                    },
+                );
+                bevel_edge(&mut cv, 205, 232);
+            }
+            Phase::Production => {
+                render::draw_solid(
+                    &mut cv,
+                    &Solid {
+                        t,
+                        angle: Some(coin_angle),
+                        rot_z: prod_wheel,
+                        rim_gain: 1.0,
+                        wob_gain: 0.0,
+                        ox: spin_env * IDLE_R * (t * IDLE_W).cos(),
+                        oy: spin_env * IDLE_R * (t * IDLE_W).sin() + park_env * PARK_Y,
                         ..Solid::base(t)
                     },
                 );
