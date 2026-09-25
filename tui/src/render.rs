@@ -54,6 +54,7 @@ pub enum Fx {
     Wipe,
     Wave,
     ScanFill,
+    ScanWindow,
 }
 
 pub struct Pass {
@@ -223,6 +224,17 @@ pub fn draw_pass(cv: &mut Canvas, p: &Pass) {
                         (py - sc).abs() > 7.0
                     };
                     if cut {
+                        continue;
+                    }
+                }
+                Fx::ScanWindow => {
+                    let sc = if p.scan >= 0.0 {
+                        p.scan
+                    } else {
+                        (p.t * 30.0).rem_euclid(cv.n as f64 + 28.0) - 14.0
+                    };
+                    let win = 0.4 * cv.r;
+                    if py > sc || py < sc - win {
                         continue;
                     }
                 }

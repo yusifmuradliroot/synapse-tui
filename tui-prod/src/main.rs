@@ -146,8 +146,14 @@ enum Key {
     F11,
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("animation-production v{VERSION}");
+        return;
+    }
     let mut auto_demo = args.iter().any(|a| a == "--demo");
 
     let saved = term::raw_start();
@@ -429,7 +435,7 @@ fn main() {
                 let mut p = Pass::base(t, frame_no);
                 p.th_u = 0.0;
                 p.th_d = 0.0;
-                p.fx = Fx::Scan;
+                p.fx = Fx::ScanWindow;
                 p.scan = sweep(scan_prog);
                 render::draw_pass(&mut cv, &p);
             }
@@ -502,7 +508,7 @@ fn main() {
                 0,
                 0,
                 &format!(
-                    " ANIMATION-PRODUCTION  {}  mic {}  [{}] {:.2}{}",
+                    " ANIMATION-PRODUCTION v{VERSION}  {}  mic {}  [{}] {:.2}{}",
                     phase.label(),
                     mic_txt,
                     meter,
