@@ -15,8 +15,6 @@ use std::io::Write;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const TAU: f64 = std::f64::consts::TAU;
-
 #[cfg(windows)]
 #[link(name = "winmm")]
 extern "system" {
@@ -63,7 +61,9 @@ const T_BLANK: f64 = 1.0;
 const T_SWEEP: f64 = 2.2;
 const T_SCANFILL: f64 = 2.6;
 const T_FACE: f64 = 1.0;
-const T_WHEEL: f64 = 0.55;
+const T_XFADE: f64 = 0.3;
+const T_DEMO_WHEEL: f64 = 4.0;
+const WHEEL_RATE: f64 = std::f64::consts::TAU;
 const FRAME: Duration = Duration::from_micros(16_667);
 
 fn sample(cv: &Canvas, x: i32, y: i32) -> u8 {
@@ -128,6 +128,13 @@ fn audio_flash(cv: &mut Canvas, amount: f64, seed: u32) {
 fn ease(p: f64) -> f64 {
     let p = p.clamp(0.0, 1.0);
     p * p * (3.0 - 2.0 * p)
+}
+
+fn blend(cv: &mut Canvas, snap: &[u8], k: f64) {
+    let k = k.clamp(0.0, 1.0);
+    for (v, s) in cv.px.iter_mut().zip(snap.iter()) {
+        *v = (*s as f64 * (1.0 - k) + *v as f64 * k).round() as u8;
+    }
 }
 
 fn angle_rate(a: f64) -> f64 {
@@ -221,6 +228,10 @@ fn main() {
     let mut disp = 0.0f64;
     let mut coin_angle = 0.0f64;
     let mut enter_angle = 0.0f64;
+    let mut wheel_th = 0.0f64;
+    let mut flat = false;
+    let mut prev_pt = 0.0f64;
+    let mut xfade: Option<(Vec<u8>, f64)> = None;
     let mut rim_t = 0.0f64;
     let mut flash_w = 0.0f64;
     let mut paused = false;
@@ -250,7 +261,11 @@ fn main() {
                 Key::Char(b'r') => {
                     phase = Phase::Blank;
                     pt = 0.0;
+                    prev_pt = 0.0;
                     coin_angle = 0.0;
+                    wheel_th = 0.0;
+                    flat = false;
+                    xfade = None;
                     rim_t = 0.0;
                     flash_w = 0.0;
                     auto_demo = false;
@@ -258,11 +273,16 @@ fn main() {
                 Key::Char(b'p') => {
                     if phase == Phase::Processing {
                         phase = Phase::CoinY;
+                        xfade = Some((cv.px.clone(), 0.0));
                     } else {
                         phase = Phase::Processing;
                         enter_angle = coin_angle;
+                        wheel_th = 0.0;
+                        flat = false;
+                        xfade = Some((cv.px.clone(), 0.0));
                     }
                     pt = 0.0;
+                    prev_pt = 0.0;
                 }
                 Key::Char(b'm') => mic_on = !mic_on,
                 Key::Char(b'h') => hud = !hud,
@@ -277,7 +297,11 @@ fn main() {
                     if auto_demo {
                         phase = Phase::Processing;
                         enter_angle = coin_angle;
+                        wheel_th = 0.0;
+                        flat = false;
+                        xfade = Some((cv.px.clone(), 0.0));
                         pt = 0.0;
+                        prev_pt = 0.0;
                     }
                 }
                 Key::F11 => {
@@ -322,6 +346,7 @@ fn main() {
         if want_n != n {
             n = want_n;
             cv = Canvas::new(n);
+            xfade = None;
         }
 
         if mic_on {
@@ -339,8 +364,9 @@ fn main() {
             disp = audio;
         }
 
-        if auto_demo && phase == Phase::Processing && pt > T_FACE + 6.0 * T_WHEEL {
+        if auto_demo && phase == Phase::Processing && pt > T_FACE + T_DEMO_WHEEL {
             phase = Phase::CoinY;
+            xfade = Some((cv.px.clone(), 0.0));
             pt = 0.0;
         }
 
@@ -352,7 +378,9 @@ fn main() {
             _ => {}
         }
         if prev_phase != phase {
+            xfade = Some((cv.px.clone(), 0.0));
             pt = 0.0;
+            prev_pt = 0.0;
         }
 
         if paused && !touched && !resized {
@@ -367,12 +395,20 @@ fn main() {
                     rim_t += dt;
                     flash_w += (1.0 - flash_w) * (1.0 - (-dt / 0.4).exp());
                 }
-                Phase::Processing if pt >= T_FACE => {
-                    coin_angle += (TAU / T_WHEEL) * dt;
+                Phase::Processing => {
+                    coin_angle += angle_rate(coin_angle) * dt;
+                    if flat {
+                        wheel_th += WHEEL_RATE * dt;
+                    }
                 }
                 _ => {}
             }
         }
+        if !flat && phase == Phase::Processing && prev_pt < T_FACE && pt >= T_FACE {
+            xfade = Some((cv.px.clone(), pt));
+            flat = true;
+        }
+        prev_pt = pt;
 
         let dark = screen.bg == BG_BLACK;
         let rim_gain = ease((rim_t / 0.5).min(1.0));
@@ -402,14 +438,30 @@ fn main() {
                 audio_flash(&mut cv, disp * disp, frame_no);
             }
             Phase::Processing => {
-                let a = if pt < T_FACE {
-                    let target =
-                        (enter_angle / std::f64::consts::PI).round() * std::f64::consts::PI;
-                    enter_angle + (target - enter_angle) * ease(pt / T_FACE)
+                if flat {
+                    let mut p = Pass::base(t, frame_no);
+                    p.th_u = wheel_th;
+                    p.th_d = wheel_th;
+                    render::draw_pass(&mut cv, &p);
                 } else {
-                    coin_angle
-                };
-                render::draw_solid(&mut cv, t, false, dark, Some(a), 1.0);
+                    let a = if pt < T_FACE {
+                        let target =
+                            (enter_angle / std::f64::consts::PI).round() * std::f64::consts::PI;
+                        enter_angle + (target - enter_angle) * ease(pt / T_FACE)
+                    } else {
+                        coin_angle
+                    };
+                    render::draw_solid(&mut cv, t, false, dark, Some(a), 1.0);
+                }
+            }
+        }
+
+        if let Some((snap, t0)) = &xfade {
+            let k = ease((pt - t0) / T_XFADE);
+            if k >= 1.0 {
+                xfade = None;
+            } else {
+                blend(&mut cv, snap, k);
             }
         }
 
