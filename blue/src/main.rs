@@ -17,14 +17,13 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 1;
+const HOTFIX: u32 = 2;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
 const T_SWEEP: f64 = 2.5;
 const T_HOLD: f64 = 0.5;
 const T_HOLD2IDLE: f64 = 1.5;
-const T_RETURN: f64 = 1.2;
 const IDLE_R: f64 = 0.08;
 const IDLE_W: f64 = 1.25663706144;
 const FRAME: Duration = Duration::from_micros(16_667);
@@ -41,11 +40,6 @@ enum Phase {
 
 fn angle_rate(a: f64) -> f64 {
     1.5 * (0.5 + (1.0 - a.cos().abs()))
-}
-
-fn ease(p: f64) -> f64 {
-    let p = p.clamp(0.0, 1.0);
-    p * p * (3.0 - 2.0 * p)
 }
 
 fn mirror_x(cv: &mut Canvas) {
@@ -94,12 +88,9 @@ fn main() {
     let mut pt = 0.0f64;
     let mut scan_prog = 0.0f64;
     let mut coin_angle = 0.0f64;
+    let mut spin_vel = 0.0f64;
+    let mut env = 0.0f64;
     let mut hold_auto = false;
-    let mut ret_angle = 0.0f64;
-    let mut ret_ox = 0.0f64;
-    let mut ret_oy = 0.0f64;
-    let mut cur_ox = 0.0f64;
-    let mut cur_oy = 0.0f64;
     let mut frame_no = 0u32;
     let mut last = Instant::now();
     let t0 = last;
@@ -111,9 +102,6 @@ fn main() {
                 pt = 0.0;
             } else if b == b'0' {
                 if phase == Phase::Idle {
-                    ret_angle = coin_angle;
-                    ret_ox = cur_ox;
-                    ret_oy = cur_oy;
                     phase = Phase::Returning;
                     pt = 0.0;
                     hold_auto = false;
@@ -147,7 +135,6 @@ fn main() {
             Phase::Scan if scan_prog >= 1.0 => phase = Phase::ScanFill,
             Phase::ScanFill if scan_prog >= 1.0 && pt >= T_SWEEP + T_HOLD => phase = Phase::Hold,
             Phase::Hold if hold_auto && pt >= T_HOLD2IDLE => phase = Phase::Idle,
-            Phase::Returning if pt >= T_RETURN => phase = Phase::Hold,
             _ => {}
         }
         if prev != phase {
@@ -163,17 +150,22 @@ fn main() {
             scan_prog = (scan_prog + dt / T_SWEEP).min(1.0);
         }
         if phase == Phase::Idle {
-            coin_angle += angle_rate(coin_angle) * dt;
-            let wt = t * IDLE_W;
-            cur_ox = IDLE_R * wt.cos();
-            cur_oy = IDLE_R * wt.sin();
+            let cruise = angle_rate(coin_angle);
+            spin_vel += (cruise - spin_vel) * (1.0 - (-dt / 0.25).exp());
+            coin_angle += spin_vel * dt;
+            env += (1.0 - env) * (1.0 - (-dt / 0.3).exp());
         } else if phase == Phase::Returning {
-            let k = ease(pt / T_RETURN);
-            let target = (ret_angle / PI).round() * PI;
-            coin_angle = ret_angle + (target - ret_angle) * k;
-        } else {
-            cur_ox = 0.0;
-            cur_oy = 0.0;
+            let target = (coin_angle / PI).round() * PI;
+            let servo = ((target - coin_angle) * 4.0).clamp(-8.0, 8.0);
+            spin_vel += (servo - spin_vel) * (1.0 - (-dt / 0.15).exp());
+            coin_angle += spin_vel * dt;
+            env += (0.0 - env) * (1.0 - (-dt / 0.3).exp());
+            if (coin_angle - target).abs() < 0.03 && spin_vel.abs() < 0.6 && env < 0.05 {
+                coin_angle = target;
+                spin_vel = 0.0;
+                phase = Phase::Hold;
+                pt = 0.0;
+            }
         }
 
         let animated = phase == Phase::Scan
@@ -228,30 +220,17 @@ fn main() {
                 render::draw_pass(&mut cv, &p);
                 mirror_x(&mut cv);
             }
-            Phase::Idle => {
+            Phase::Idle | Phase::Returning => {
+                let wt = t * IDLE_W;
                 render::draw_solid(
                     &mut cv,
                     &Solid {
                         t,
                         angle: Some(coin_angle),
-                        ox: cur_ox,
-                        oy: cur_oy,
-                        ..Solid::base(t)
-                    },
-                );
-            }
-            Phase::Returning => {
-                let k = ease(pt / T_RETURN);
-                let g = 1.0 - k;
-                render::draw_solid(
-                    &mut cv,
-                    &Solid {
-                        t,
-                        angle: Some(coin_angle),
-                        rim_gain: g,
-                        wob_gain: g,
-                        ox: ret_ox * (1.0 - k),
-                        oy: ret_oy * (1.0 - k),
+                        rim_gain: env,
+                        wob_gain: env,
+                        ox: env * IDLE_R * wt.cos(),
+                        oy: env * IDLE_R * wt.sin(),
                         ..Solid::base(t)
                     },
                 );
