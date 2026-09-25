@@ -16,10 +16,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const TAU: f64 = std::f64::consts::TAU;
-const FRAC_PI_2: f64 = std::f64::consts::FRAC_PI_2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
+    Blank,
+    Appear,
     StaticStar,
     ScanErase,
     ScanFill,
@@ -32,6 +33,8 @@ enum Phase {
 impl Phase {
     fn label(self) -> &'static str {
         match self {
+            Phase::Blank => "0 BLANK",
+            Phase::Appear => "0 APPEAR",
             Phase::StaticStar => "1 STATIC",
             Phase::ScanErase => "2 SCAN / ERASE",
             Phase::ScanFill => "3 SCAN / KEEP",
@@ -43,7 +46,9 @@ impl Phase {
     }
 }
 
-const T_STATIC: f64 = 1.4;
+const T_BLANK: f64 = 0.9;
+const T_APPEAR: f64 = 1.2;
+const T_STATIC: f64 = 1.2;
 const T_SCAN1: f64 = 2.4;
 const T_SCAN2: f64 = 2.4;
 const T_SHRINK: f64 = 2.8;
@@ -108,6 +113,19 @@ fn glow(cv: &mut Canvas, amount: f64) {
 fn ease(p: f64) -> f64 {
     let p = p.clamp(0.0, 1.0);
     p * p * (3.0 - 2.0 * p)
+}
+
+fn brightness(cv: &mut Canvas, mul: f64) {
+    let m = mul.clamp(0.0, 1.0);
+    for v in cv.px.iter_mut() {
+        if *v > 0 {
+            *v = (*v as f64 * m).round().clamp(1.0, 255.0) as u8;
+        }
+    }
+}
+
+fn angle_rate(a: f64) -> f64 {
+    1.5 * (0.5 + (1.0 - a.cos().abs()))
 }
 
 enum Key {
@@ -187,9 +205,17 @@ fn main() {
 
     let mut screen = Screen::new(80, 24);
     screen.set_bg(BG_BLACK);
-    let mut phase = Phase::StaticStar;
+    let mut phase = Phase::Blank;
     let mut pt = 0.0f64;
     let mut audio = 0.0f64;
+    let mut coin_angle = 0.0f64;
+    let mut enter_angle = 0.0f64;
+    let mut enter_bx = 0i32;
+    let mut enter_by = 0i32;
+    let mut enter_scale = 1.0f64;
+    let mut last_bx = 0i32;
+    let mut last_by = 0i32;
+    let mut last_scale = 1.0f64;
     let mut paused = false;
     let mut fullscreen = false;
     let mut hud = true;
@@ -211,8 +237,9 @@ fn main() {
                 Key::Char(b'q') | Key::Char(3) => quit = true,
                 Key::Char(b' ') => paused = !paused,
                 Key::Char(b'r') => {
-                    phase = Phase::StaticStar;
+                    phase = Phase::Blank;
                     pt = 0.0;
+                    coin_angle = 0.0;
                     auto_demo = false;
                 }
                 Key::Char(b'p') => {
@@ -220,6 +247,10 @@ fn main() {
                         phase = Phase::Glow;
                     } else {
                         phase = Phase::Processing;
+                        enter_angle = coin_angle;
+                        enter_bx = last_bx;
+                        enter_by = last_by;
+                        enter_scale = last_scale;
                     }
                     pt = 0.0;
                 }
@@ -235,6 +266,10 @@ fn main() {
                     auto_demo = !auto_demo;
                     if auto_demo {
                         phase = Phase::Processing;
+                        enter_angle = coin_angle;
+                        enter_bx = last_bx;
+                        enter_by = last_by;
+                        enter_scale = last_scale;
                         pt = 0.0;
                     }
                 }
@@ -291,13 +326,15 @@ fn main() {
             audio *= 0.92;
         }
 
-        if auto_demo && phase == Phase::Processing && pt > T_FACE + 8.0 * T_WHEEL {
+        if auto_demo && phase == Phase::Processing && pt > T_FACE + 6.0 * T_WHEEL {
             phase = Phase::Glow;
             pt = 0.0;
         }
 
         let prev_phase = phase;
         match phase {
+            Phase::Blank if pt >= T_BLANK => phase = Phase::Appear,
+            Phase::Appear if pt >= T_APPEAR => phase = Phase::StaticStar,
             Phase::StaticStar if pt >= T_STATIC => phase = Phase::ScanErase,
             Phase::ScanErase if pt >= T_SCAN1 => phase = Phase::ScanFill,
             Phase::ScanFill if pt >= T_SCAN2 => phase = Phase::Shrink,
@@ -307,12 +344,35 @@ fn main() {
         }
         if prev_phase != phase {
             pt = 0.0;
+            if phase == Phase::Processing {
+                enter_angle = coin_angle;
+                enter_bx = last_bx;
+                enter_by = last_by;
+                enter_scale = last_scale;
+            }
+        }
+
+        if !paused {
+            match phase {
+                Phase::Active => coin_angle += angle_rate(coin_angle) * dt,
+                Phase::Glow => coin_angle += angle_rate(coin_angle) * dt * 0.35,
+                Phase::Processing if pt >= T_FACE => {
+                    coin_angle += (TAU / T_WHEEL) * dt;
+                }
+                _ => {}
+            }
         }
 
         cv.clear();
         let nf = n as f64;
         let dark = screen.bg == BG_BLACK;
         match phase {
+            Phase::Blank => {}
+            Phase::Appear => {
+                let p = Pass::base(t, 0);
+                render::draw_pass(&mut cv, &p);
+                brightness(&mut cv, ease(pt / T_APPEAR));
+            }
             Phase::StaticStar => {
                 let p = Pass::base(t, 0);
                 render::draw_pass(&mut cv, &p);
@@ -335,23 +395,25 @@ fn main() {
             }
             Phase::Shrink => {
                 let mut p = Pass::base(t, 0);
-                p.th_u = 0.14 * (T_SCAN1 + T_SCAN2 + pt);
+                p.th_u = 0.10 * (T_SCAN1 + T_SCAN2) + 0.14 * pt;
                 p.th_d = p.th_u;
                 render::draw_pass(&mut cv, &p);
             }
             Phase::Active => {
-                render::draw_solid(&mut cv, t, false, dark, None);
+                render::draw_solid(&mut cv, t, false, dark, Some(coin_angle));
             }
             Phase::Processing => {
                 let a = if pt < T_FACE {
-                    FRAC_PI_2 * (1.0 - ease(pt / T_FACE))
+                    let target =
+                        (enter_angle / std::f64::consts::PI).round() * std::f64::consts::PI;
+                    enter_angle + (target - enter_angle) * ease(pt / T_FACE)
                 } else {
-                    ((pt - T_FACE) / T_WHEEL) * TAU
+                    coin_angle
                 };
                 render::draw_solid(&mut cv, t, false, dark, Some(a));
             }
             Phase::Glow => {
-                render::draw_solid(&mut cv, t, false, dark, None);
+                render::draw_solid(&mut cv, t, false, dark, Some(coin_angle));
                 let k = if pt < 0.18 {
                     pt / 0.18
                 } else if pt < 0.55 {
@@ -378,10 +440,19 @@ fn main() {
                 let y = full_y as f64 * (1.0 - k) + corner_y as f64 * k;
                 (x as i32, y as i32, s)
             }
+            Phase::Processing if pt < T_FACE => {
+                let k = ease(pt / T_FACE);
+                let x = enter_bx as f64 * (1.0 - k) + corner_x as f64 * k;
+                let y = enter_by as f64 * (1.0 - k) + corner_y as f64 * k;
+                let sc = enter_scale * (1.0 - k) + audio_scale * k;
+                (x as i32, y as i32, sc)
+            }
             Phase::Active | Phase::Processing | Phase::Glow => (corner_x, corner_y, audio_scale),
             _ => (full_x, full_y, fill),
         };
-
+        last_bx = bx;
+        last_by = by;
+        last_scale = scale;
         screen.reset(w, h);
         blit(&mut screen, &cv, bx, by, scale);
 

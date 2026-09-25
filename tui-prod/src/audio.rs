@@ -128,8 +128,8 @@ mod imp {
                 failed.store(1, Ordering::Relaxed);
                 return;
             }
-            let mut raw: Vec<u8> = vec![0; BUF_FRAMES * 2 * NBUF];
-            let base = raw.as_mut_ptr();
+            let mut raw: Vec<i16> = vec![0; BUF_FRAMES * NBUF];
+            let base = raw.as_mut_ptr() as *mut u8;
             let mut hdrs: [WaveHdr; NBUF] = Default::default();
             let mut prepared = 0usize;
             for (i, hdr) in hdrs.iter_mut().enumerate() {
@@ -141,7 +141,17 @@ mod imp {
                 }
                 prepared += 1;
             }
-            if prepared != NBUF || waveInStart(hwi) != 0 {
+            if prepared != NBUF {
+                failed.store(1, Ordering::Relaxed);
+                return;
+            }
+            for hdr in hdrs.iter_mut() {
+                if waveInAddBuffer(hwi, hdr, HDR_SIZE) != 0 {
+                    failed.store(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+            if waveInStart(hwi) != 0 {
                 failed.store(1, Ordering::Relaxed);
                 return;
             }
@@ -159,6 +169,7 @@ mod imp {
                             sum += v * v;
                         }
                         count += samples as u32;
+                        hdr.dw_flags &= !WHDR_DONE;
                         waveInAddBuffer(hwi, hdr, HDR_SIZE);
                     }
                 }
