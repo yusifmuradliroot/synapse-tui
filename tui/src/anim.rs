@@ -1,4 +1,4 @@
-use crate::render::{draw_pass, draw_solid, Canvas, Fx, Pass};
+use crate::render::{draw_pass, draw_solid, Canvas, Fx, Pass, Solid};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Variant {
@@ -165,11 +165,24 @@ pub fn draw(cv: &mut Canvas, v: Variant, cell: &mut Cell, env: &mut Env) {
             }
         }
         Variant::CoinX => {
-            draw_solid(cv, t, true, env.dark_bg, None, 1.0);
+            draw_solid(
+                cv,
+                &Solid {
+                    axis_x: true,
+                    dark_bg: env.dark_bg,
+                    ..Solid::base(t)
+                },
+            );
             return;
         }
         Variant::CoinY => {
-            draw_solid(cv, t, false, env.dark_bg, None, 1.0);
+            draw_solid(
+                cv,
+                &Solid {
+                    dark_bg: env.dark_bg,
+                    ..Solid::base(t)
+                },
+            );
             return;
         }
         _ => {}

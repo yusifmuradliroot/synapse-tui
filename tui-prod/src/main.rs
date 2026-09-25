@@ -448,7 +448,7 @@ fn main() {
                 render::draw_pass(&mut cv, &p);
             }
             Phase::CoinY => {
-                render::draw_solid(&mut cv, t, false, dark, Some(coin_angle), rim_gain);
+                render::draw_solid(&mut cv, &render::Solid { t, dark_bg: dark, angle: Some(coin_angle), rim_gain, ..render::Solid::base(t) });
                 audio_flash(&mut cv, disp * disp, frame_no);
             }
             Phase::Processing => {
@@ -465,7 +465,7 @@ fn main() {
                     } else {
                         coin_angle
                     };
-                    render::draw_solid(&mut cv, t, false, dark, Some(a), 1.0);
+                    render::draw_solid(&mut cv, &render::Solid { t, dark_bg: dark, angle: Some(a), ..render::Solid::base(t) });
                 }
             }
         }

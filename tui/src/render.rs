@@ -274,21 +274,41 @@ pub fn draw_pass(cv: &mut Canvas, p: &Pass) {
     }
 }
 
-pub fn draw_solid(
-    cv: &mut Canvas,
-    t: f64,
-    axis_x: bool,
-    dark_bg: bool,
-    angle: Option<f64>,
-    rim_gain: f64,
-) {
+#[derive(Clone, Copy)]
+pub struct Solid {
+    pub t: f64,
+    pub axis_x: bool,
+    pub dark_bg: bool,
+    pub angle: Option<f64>,
+    pub rim_gain: f64,
+    pub ox: f64,
+    pub oy: f64,
+}
+
+impl Solid {
+    pub fn base(t: f64) -> Solid {
+        Solid {
+            t,
+            axis_x: false,
+            dark_bg: false,
+            angle: None,
+            rim_gain: 1.0,
+            ox: 0.0,
+            oy: 0.0,
+        }
+    }
+}
+
+pub fn draw_solid(cv: &mut Canvas, s: &Solid) {
+    let (t, axis_x, dark_bg) = (s.t, s.axis_x, s.dark_bg);
+    let (ox, oy) = (s.ox, s.oy);
     let auto = t * 1.5;
-    let mut a = match angle {
+    let mut a = match s.angle {
         Some(v) => v,
         None => auto,
     };
     for _ in 0..4 {
-        if angle.is_none() {
+        if s.angle.is_none() {
             a += 0.004 * (0.5 + (1.0 - a.cos().abs()));
         }
     }
@@ -310,13 +330,17 @@ pub fn draw_solid(
     };
     let proj = |v: (f64, f64, f64)| -> (f64, f64, f64) {
         let f = CAM / (CAM - v.2);
-        (cv.cx + v.0 * cv.r * f, cv.cy + v.1 * cv.r * f, v.2)
+        (
+            cv.cx + (v.0 + ox) * cv.r * f,
+            cv.cy + (v.1 + oy) * cv.r * f,
+            v.2,
+        )
     };
     let front: Vec<(f64, f64, f64)> = SOLID_PTS.iter().map(|p| proj(mv(*p, HD))).collect();
     let back: Vec<(f64, f64, f64)> = SOLID_PTS.iter().map(|p| proj(mv(*p, -HD))).collect();
 
     let p3 = |v: &Vec<(f64, f64, f64)>, i: usize| (v[i].0, v[i].1);
-    let gain = rim_gain.clamp(0.0, 1.0);
+    let gain = s.rim_gain.clamp(0.0, 1.0);
     if gain > 0.02 && dark_bg {
         let back_v = (55.0 * gain) as u8;
         cv.tri([p3(&back, 0), p3(&back, 1), p3(&back, 2)], back_v);

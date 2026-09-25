@@ -1,4 +1,5 @@
 mod anim;
+#[allow(dead_code)]
 mod render;
 mod term;
 
@@ -52,6 +53,7 @@ enum Key {
     F11,
 }
 
+#[allow(dead_code)]
 mod screen;
 
 struct Unit {
