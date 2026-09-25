@@ -12,7 +12,7 @@ mod audio;
 use render::{Canvas, Fx, Pass};
 use screen::{Screen, BG_BLACK, BG_CYCLE, BG_FULL_BLUE};
 use std::io::Write;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -162,18 +162,19 @@ fn main() {
     let _ = out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[2J");
     let _ = out.flush();
 
-    let shared: Arc<Mutex<String>> = Arc::new(Mutex::new(String::with_capacity(1 << 18)));
-    let (wtx, wrx) = mpsc::sync_channel::<()>(1);
-    let wshared = shared.clone();
+    let (wtx, wrx) = mpsc::sync_channel::<String>(1);
+    let (rtx, rrx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let so = std::io::stdout();
         let mut lock = so.lock();
-        while wrx.recv().is_ok() {
-            let s = wshared.lock().unwrap().clone();
-            if lock.write_all(s.as_bytes()).is_err() {
+        while let Ok(buf) = wrx.recv() {
+            if lock.write_all(buf.as_bytes()).is_err() {
                 break;
             }
             let _ = lock.flush();
+            if rtx.send(buf).is_err() {
+                break;
+            }
         }
     });
 
@@ -223,6 +224,28 @@ fn main() {
         }
     });
 
+    let mut boot: Option<(usize, usize)> = None;
+    {
+        let mut last = (0usize, 0usize);
+        let mut stable = 0;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(12));
+            if let Some(sz) = term::size_checked() {
+                if sz == last {
+                    stable += 1;
+                    if stable >= 3 {
+                        boot = Some(sz);
+                        break;
+                    }
+                } else {
+                    last = sz;
+                    stable = 0;
+                }
+            }
+        }
+        boot = boot.or(term::size_checked());
+    }
+
     let mic = audio::start_mic();
     let mut mic_on = mic.is_some();
 
@@ -246,9 +269,7 @@ fn main() {
     let mut hud = true;
     let mut bg_idx = 0usize;
     let mut size_mul = 1.0f64;
-    let mut started = false;
-    let mut prev_w = 0usize;
-    let mut prev_h = 0usize;
+    let (mut prev_w, mut prev_h) = boot.unwrap_or((80, 24));
     let mut last_hash = 0u64;
     let mut n = 73i32;
     let mut cv = Canvas::new(n);
@@ -339,11 +360,6 @@ fn main() {
         let (tw, th) = term::size();
         let w = tw.max(30);
         let h = th.max(10);
-        if !started {
-            started = true;
-            prev_w = w;
-            prev_h = h;
-        }
         let resized = w != prev_w || h != prev_h;
         if resized {
             prev_w = w;
@@ -482,11 +498,14 @@ fn main() {
         frame_no = frame_no.wrapping_add(1);
 
         let audio_mul = 1.0 + 0.38 * disp * flash_w;
-        let fill = (((h as f64 - 2.0) * 2.0) / (n as f64 * 0.548)).clamp(1.0, 2.2);
-        let scale = fill * size_mul * audio_mul;
-        let full_w = (n as f64 * scale) as i32;
+        let nf = n as f64;
+        let max_s = ((w as f64 - 1.0) / nf).min(((h as f64 - 2.0) * 2.0) / nf);
+        let base_s = (max_s * 0.82).clamp(0.25, 2.2);
+        let scale = (base_s * size_mul * audio_mul).clamp(0.2, max_s.max(0.2));
+        let full_w = (nf * scale) as i32;
+        let full_h = ((nf * scale / 2.0).round() as i32).max(1);
         let bx = (w as i32 - full_w) / 2;
-        let by = 1 + (h as i32 - 2 - ((n as f64 * scale / 2.0) as i32).max(1)) / 2;
+        let by = 1 + (h as i32 - 2 - full_h).max(0) / 2;
 
         screen.reset(w, h);
         blit(&mut screen, &cv, bx, by, scale);
@@ -528,14 +547,14 @@ fn main() {
         let hh = screen.hash();
         if hh != last_hash || resized || touched {
             last_hash = hh;
-            {
-                let mut f = shared.lock().unwrap();
-                screen.render_into(&mut f);
-                if resized {
-                    f.insert_str(0, "\x1b[2J");
-                }
+            let mut buf = rrx
+                .try_recv()
+                .unwrap_or_else(|_| String::with_capacity(1 << 17));
+            screen.render_into(&mut buf);
+            if resized {
+                buf.insert_str(0, "\x1b[2J");
             }
-            let _ = wtx.try_send(());
+            let _ = wtx.try_send(buf);
         }
 
         let spent = now.elapsed();
