@@ -152,6 +152,7 @@ pub struct Env<'a> {
     pub spd: f64,
     pub frame: u32,
     pub rng: &'a mut Rng,
+    pub dark_bg: bool,
 }
 
 pub fn draw(cv: &mut Canvas, v: Variant, cell: &mut Cell, env: &mut Env) {
@@ -164,11 +165,11 @@ pub fn draw(cv: &mut Canvas, v: Variant, cell: &mut Cell, env: &mut Env) {
             }
         }
         Variant::CoinX => {
-            draw_solid(cv, t, true);
+            draw_solid(cv, t, true, env.dark_bg);
             return;
         }
         Variant::CoinY => {
-            draw_solid(cv, t, false);
+            draw_solid(cv, t, false, env.dark_bg);
             return;
         }
         _ => {}

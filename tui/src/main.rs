@@ -234,13 +234,14 @@ fn grid(list: &[Variant], max_cols: usize, w: usize, h: usize) -> (i32, Vec<(usi
     let step = sw + gap;
     let total_w = cols * sw + (cols - 1) * gap;
     let x0 = ((w.saturating_sub(total_w)) / 2) as i32;
-    let block_h = rows * (sw / 2 + 1);
+    let cell_h = sw.div_ceil(2) + 1;
+    let block_h = rows * cell_h;
     let y0 = 1 + (avail_h.saturating_sub(block_h) / 2) as i32;
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let c = i % cols;
         let r = i / cols;
-        out.push((i, x0 + (c * step) as i32, y0 + (r * (sw / 2 + 1)) as i32));
+        out.push((i, x0 + (c * step) as i32, y0 + (r * cell_h) as i32));
     }
     (s, out)
 }
@@ -305,6 +306,7 @@ fn dump(dir: &str) {
                 spd: 1.26,
                 frame: f,
                 rng: &mut rng,
+                dark_bg: true,
             };
             anim::draw(&mut cv, *v, &mut cell, &mut env);
         }
@@ -508,7 +510,8 @@ fn main() {
                 mode = Mode::Grid4;
             }
         }
-        if w != prev_w || h != prev_h {
+        let resized = w != prev_w || h != prev_h;
+        if resized {
             prev_w = w;
             prev_h = h;
             touched = true;
@@ -574,18 +577,16 @@ fn main() {
         for (u, (_, x, y)) in units.iter_mut().zip(places.iter()) {
             u.x = *x;
             u.y = *y;
-            anim::draw(
-                &mut u.cv,
-                u.v,
-                &mut u.cell,
-                &mut anim::Env {
-                    t,
-                    dt: draw_dt,
-                    spd,
-                    frame,
-                    rng: &mut rng,
-                },
-            );
+            let dark_bg = screen.bg == BG_BLACK;
+            let mut env = anim::Env {
+                t,
+                dt: draw_dt,
+                spd,
+                frame,
+                rng: &mut rng,
+                dark_bg,
+            };
+            anim::draw(&mut u.cv, u.v, &mut u.cell, &mut env);
             let rows = (u.cv.n as usize).div_ceil(2);
             for j in 0..rows {
                 let y0 = 2 * j as i32;
@@ -618,7 +619,10 @@ fn main() {
             screen.text(0, h as i32 - 1, &help_text(w, paused, auto), 235);
         }
 
-        let buf = screen.render();
+        let mut buf = screen.render();
+        if resized {
+            buf.insert_str(0, "\x1b[2J");
+        }
         let _ = wtx.try_send(buf);
 
         let spent = now.elapsed();
