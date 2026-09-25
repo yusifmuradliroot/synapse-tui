@@ -68,15 +68,6 @@ mod imp {
         }
     }
 
-    pub fn size_checked() -> Option<(usize, usize)> {
-        let (w, h) = size();
-        if w >= 40 && h >= 15 {
-            Some((w, h))
-        } else {
-            None
-        }
-    }
-
     pub fn read_byte() -> u8 {
         unsafe {
             let mut b = 0u8;
@@ -173,21 +164,15 @@ mod imp {
     }
 
     pub fn size() -> (usize, usize) {
-        size_checked().unwrap_or((80, 24))
-    }
-
-    pub fn size_checked() -> Option<(usize, usize)> {
         unsafe {
             let mut i = Info::default();
-            if GetConsoleScreenBufferInfo(GetStdHandle(-11), &mut i) == 0 {
-                return None;
-            }
-            let w = (i.window.right - i.window.left + 1) as usize;
-            let h = (i.window.bottom - i.window.top + 1) as usize;
-            if w >= 40 && h >= 15 {
-                Some((w, h))
+            if GetConsoleScreenBufferInfo(GetStdHandle(-11), &mut i) != 0 {
+                (
+                    (i.window.right - i.window.left + 1) as usize,
+                    (i.window.bottom - i.window.top + 1) as usize,
+                )
             } else {
-                None
+                (80, 24)
             }
         }
     }
@@ -207,4 +192,4 @@ mod imp {
     }
 }
 
-pub use imp::{raw_start, raw_stop, read_byte, set_fullscreen, size, size_checked};
+pub use imp::{raw_start, raw_stop, read_byte, set_fullscreen, size};
