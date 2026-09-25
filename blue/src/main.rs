@@ -8,7 +8,7 @@ mod screen;
 #[path = "../../tui/src/term.rs"]
 mod term;
 
-use render::{Canvas, Fx, Pass, Solid};
+use render::{Canvas, Solid};
 use screen::{Screen, BG_FULL_BLUE};
 use std::f64::consts::PI;
 use std::io::Write;
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 2;
+const HOTFIX: u32 = 0;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
@@ -25,10 +25,11 @@ const T_SWEEP: f64 = 2.5;
 const T_HOLD: f64 = 0.5;
 const T_HOLD2IDLE: f64 = 1.5;
 const IDLE_R: f64 = 0.08;
+const PARK_Y: f64 = -0.15;
 const IDLE_W: f64 = 1.25663706144;
 const FRAME: Duration = Duration::from_micros(16_667);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
     Blank,
     Scan,
@@ -40,6 +41,58 @@ enum Phase {
 
 fn angle_rate(a: f64) -> f64 {
     1.5 * (0.5 + (1.0 - a.cos().abs()))
+}
+
+fn clip_y(cv: &mut Canvas, lo: f64, hi: f64) {
+    let n = cv.n;
+    for y in 0..n {
+        let py = y as f64 + 0.5;
+        if py < lo || py >= hi {
+            for x in 0..n {
+                cv.px[(y * n + x) as usize] = 0;
+            }
+        }
+    }
+}
+
+fn coin_face(cv: &mut Canvas, t: f64, ox: f64, oy: f64) {
+    render::draw_solid(
+        cv,
+        &Solid {
+            t,
+            angle: Some(0.0),
+            rim_gain: 1.0,
+            wob_gain: 0.0,
+            ox,
+            oy,
+            ..Solid::base(t)
+        },
+    );
+}
+
+fn bevel_edge(cv: &mut Canvas, v: u8) {
+    let n = cv.n;
+    let src = cv.px.clone();
+    let at = |x: i32, y: i32| -> u8 {
+        if x < 0 || y < 0 || x >= n || y >= n {
+            0
+        } else {
+            src[(y * n + x) as usize]
+        }
+    };
+    for y in 0..n {
+        for x in 0..n {
+            let i = (y * n + x) as usize;
+            if src[i] == 255
+                && (at(x - 1, y) != 255
+                    || at(x + 1, y) != 255
+                    || at(x, y - 1) != 255
+                    || at(x, y + 1) != 255)
+            {
+                cv.px[i] = v;
+            }
+        }
+    }
 }
 
 fn mirror_x(cv: &mut Canvas) {
@@ -62,7 +115,6 @@ fn main() {
         println!("{NAME} v{ver}");
         return;
     }
-
     let saved = term::raw_start();
     let mut out = std::io::stdout();
     let _ = out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[2J");
@@ -89,7 +141,8 @@ fn main() {
     let mut scan_prog = 0.0f64;
     let mut coin_angle = 0.0f64;
     let mut spin_vel = 0.0f64;
-    let mut env = 0.0f64;
+    let mut spin_env = 0.0f64;
+    let mut park_env = 0.0f64;
     let mut hold_auto = false;
     let mut frame_no = 0u32;
     let mut last = Instant::now();
@@ -149,18 +202,28 @@ fn main() {
         if phase == Phase::Scan || phase == Phase::ScanFill {
             scan_prog = (scan_prog + dt / T_SWEEP).min(1.0);
         }
+        let spin_target = if phase == Phase::Idle { 1.0 } else { 0.0 };
+        spin_env += (spin_target - spin_env) * (1.0 - (-dt / 0.3).exp());
+        let park_target = match phase {
+            Phase::Hold | Phase::Returning => 1.0,
+            Phase::ScanFill if scan_prog >= 1.0 => 1.0,
+            _ => 0.0,
+        };
+        park_env += (park_target - park_env) * (1.0 - (-dt / 0.25).exp());
         if phase == Phase::Idle {
             let cruise = angle_rate(coin_angle);
             spin_vel += (cruise - spin_vel) * (1.0 - (-dt / 0.25).exp());
             coin_angle += spin_vel * dt;
-            env += (1.0 - env) * (1.0 - (-dt / 0.3).exp());
         } else if phase == Phase::Returning {
             let target = (coin_angle / PI).round() * PI;
             let servo = ((target - coin_angle) * 4.0).clamp(-8.0, 8.0);
             spin_vel += (servo - spin_vel) * (1.0 - (-dt / 0.15).exp());
             coin_angle += spin_vel * dt;
-            env += (0.0 - env) * (1.0 - (-dt / 0.3).exp());
-            if (coin_angle - target).abs() < 0.03 && spin_vel.abs() < 0.6 && env < 0.05 {
+            if (coin_angle - target).abs() < 0.03
+                && spin_vel.abs() < 0.6
+                && spin_env < 0.05
+                && park_env > 0.95
+            {
                 coin_angle = target;
                 spin_vel = 0.0;
                 phase = Phase::Hold;
@@ -194,30 +257,21 @@ fn main() {
         match phase {
             Phase::Blank => {}
             Phase::Scan => {
-                let mut p = Pass::base(0.0, frame_no);
-                p.th_u = 0.0;
-                p.th_d = 0.0;
-                p.fx = Fx::ScanWindow;
-                p.scan = sweep;
-                render::draw_pass(&mut cv, &p);
+                let r = cv.r;
+                coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
+                clip_y(&mut cv, sweep - 0.4 * r, sweep);
+                bevel_edge(&mut cv, 220);
                 mirror_x(&mut cv);
             }
             Phase::ScanFill => {
-                let mut p = Pass::base(0.0, frame_no);
-                p.th_u = 0.0;
-                p.th_d = 0.0;
-                p.fx = Fx::ScanFill;
-                p.scan = sweep;
-                render::draw_pass(&mut cv, &p);
+                coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
+                clip_y(&mut cv, f64::MIN, sweep + 7.0);
+                bevel_edge(&mut cv, 220);
                 mirror_x(&mut cv);
             }
             Phase::Hold => {
-                let mut p = Pass::base(0.0, frame_no);
-                p.th_u = 0.0;
-                p.th_d = 0.0;
-                p.fx = Fx::ScanFill;
-                p.scan = -14.0 + (nf + 28.0);
-                render::draw_pass(&mut cv, &p);
+                coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
+                bevel_edge(&mut cv, 220);
                 mirror_x(&mut cv);
             }
             Phase::Idle | Phase::Returning => {
@@ -227,13 +281,14 @@ fn main() {
                     &Solid {
                         t,
                         angle: Some(coin_angle),
-                        rim_gain: env,
-                        wob_gain: env,
-                        ox: env * IDLE_R * wt.cos(),
-                        oy: env * IDLE_R * wt.sin(),
+                        rim_gain: 1.0,
+                        wob_gain: spin_env,
+                        ox: spin_env * IDLE_R * wt.cos(),
+                        oy: spin_env * IDLE_R * wt.sin() + park_env * PARK_Y,
                         ..Solid::base(t)
                     },
                 );
+                bevel_edge(&mut cv, 220);
             }
         }
         frame_no = frame_no.wrapping_add(1);
