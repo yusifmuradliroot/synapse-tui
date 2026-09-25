@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 0;
+const HOTFIX: u32 = 1;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
@@ -159,6 +159,7 @@ fn main() {
     let mut scan_prog = 0.0f64;
     let mut coin_angle = 0.0f64;
     let mut spin_vel = 0.0f64;
+    let mut parked = false;
     let mut spin_env = 0.0f64;
     let mut park_env = 0.0f64;
     let mut prod_wheel = 0.0f64;
@@ -183,14 +184,17 @@ fn main() {
             } else if b == b'0' {
                 if phase == Phase::Production {
                     prod_stop = Some(Phase::Hold);
+                    parked = true;
                 } else if phase == Phase::Idle {
                     phase = Phase::Returning;
                     pt = 0.0;
                     hold_auto = false;
+                    parked = true;
                 } else if phase != Phase::Hold {
                     phase = Phase::Hold;
                     pt = 0.0;
                     hold_auto = false;
+                    parked = true;
                 }
             } else if b == b'q' || b == 0x1b || b == 3 {
                 term::raw_stop(&saved);
@@ -226,6 +230,7 @@ fn main() {
             }
             if phase == Phase::Hold && prev == Phase::ScanFill {
                 hold_auto = true;
+                parked = false;
             }
         }
         if phase == Phase::Scan || phase == Phase::ScanFill {
@@ -234,8 +239,8 @@ fn main() {
         let spin_target = if phase == Phase::Idle { 1.0 } else { 0.0 };
         spin_env += (spin_target - spin_env) * (1.0 - (-dt / 0.3).exp());
         let park_target = match phase {
-            Phase::Hold | Phase::Returning | Phase::Production => 1.0,
-            Phase::ScanFill if scan_prog >= 1.0 => 1.0,
+            Phase::Hold if parked => 1.0,
+            Phase::Returning | Phase::Production => 1.0,
             _ => 0.0,
         };
         park_env += (park_target - park_env) * (1.0 - (-dt / 0.25).exp());
