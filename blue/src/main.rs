@@ -16,14 +16,14 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 0;
+const HOTFIX: u32 = 1;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
 const T_SWEEP: f64 = 2.5;
 const T_HOLD: f64 = 0.5;
 const T_HOLD2IDLE: f64 = 1.5;
-const IDLE_R: f64 = 0.15;
+const IDLE_R: f64 = 0.08;
 const IDLE_W: f64 = 1.25663706144;
 const FRAME: Duration = Duration::from_micros(16_667);
 
@@ -38,13 +38,6 @@ enum Phase {
 
 fn angle_rate(a: f64) -> f64 {
     1.5 * (0.5 + (1.0 - a.cos().abs()))
-}
-
-fn blend(cv: &mut Canvas, snap: &[u8], k: f64) {
-    let k = k.clamp(0.0, 1.0);
-    for (v, sn) in cv.px.iter_mut().zip(snap.iter()) {
-        *v = (*sn as f64 * (1.0 - k) + *v as f64 * k).round() as u8;
-    }
 }
 
 fn mirror_x(cv: &mut Canvas) {
@@ -93,7 +86,6 @@ fn main() {
     let mut pt = 0.0f64;
     let mut scan_prog = 0.0f64;
     let mut coin_angle = 0.0f64;
-    let mut idle_blend: Option<(Vec<u8>, f64)> = None;
     let mut frame_no = 0u32;
     let mut last = Instant::now();
     let t0 = last;
@@ -103,7 +95,6 @@ fn main() {
             if b == b'2' && phase != Phase::Idle {
                 phase = Phase::Idle;
                 pt = 0.0;
-                idle_blend = Some((cv.px.clone(), 0.0));
             } else if b == b'q' || b == 0x1b || b == 3 {
                 term::raw_stop(&saved);
                 let _ = out.write_all(b"\x1b[?25h\x1b[0m\x1b[?1049l");
@@ -135,9 +126,6 @@ fn main() {
             pt = 0.0;
             if phase == Phase::Scan || phase == Phase::ScanFill {
                 scan_prog = 0.0;
-            }
-            if phase == Phase::Idle {
-                idle_blend = Some((cv.px.clone(), 0.0));
             }
         }
         if phase == Phase::Scan || phase == Phase::ScanFill {
@@ -208,14 +196,6 @@ fn main() {
                         ..Solid::base(t)
                     },
                 );
-            }
-        }
-        if let Some((snap, t0)) = &idle_blend {
-            let k = (pt - t0) / 0.4;
-            if k >= 1.0 {
-                idle_blend = None;
-            } else {
-                blend(&mut cv, snap, k);
             }
         }
         frame_no = frame_no.wrapping_add(1);
