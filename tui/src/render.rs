@@ -281,6 +281,7 @@ pub struct Solid {
     pub dark_bg: bool,
     pub angle: Option<f64>,
     pub rim_gain: f64,
+    pub wob_gain: f64,
     pub ox: f64,
     pub oy: f64,
 }
@@ -293,6 +294,7 @@ impl Solid {
             dark_bg: false,
             angle: None,
             rim_gain: 1.0,
+            wob_gain: 1.0,
             ox: 0.0,
             oy: 0.0,
         }
@@ -312,8 +314,8 @@ pub fn draw_solid(cv: &mut Canvas, s: &Solid) {
             a += 0.004 * (0.5 + (1.0 - a.cos().abs()));
         }
     }
-    let wob = 0.16 * (t * 1.15).sin();
-    let wob2 = 0.12 * ((t * 0.83) + 1.4).sin();
+    let wob = s.wob_gain * 0.16 * (t * 1.15).sin();
+    let wob2 = s.wob_gain * 0.12 * ((t * 0.83) + 1.4).sin();
     let (ca, sa) = (a.cos(), a.sin());
     let (cw, sw) = (wob.cos(), wob.sin());
     let (cw2, sw2) = (wob2.cos(), wob2.sin());
