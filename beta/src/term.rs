@@ -190,9 +190,9 @@ mod imp {
         }
     }
 
-    // Konsolu 1280x720 istemci alanina yaklastir: 8x8 raster font + hucre
-    // sayisi + dis pencere boyutu. Basarisiz olursa sessizce vazgecilir,
-    // uygulama mevcut konsol boyutuyla calismaya devam eder.
+    // Konsolu stabil 1280x720 istemci alanina getir: 6x12 TrueType font,
+    // tampon = pencere (kaydirma cubugu yok) + dis pencere boyutu.
+    // Basarisiz olursa sessizce vazgecilir, mevcut konsol kullanilir.
     pub fn setup_window() {
         unsafe {
             let hwnd = GetConsoleWindow();
@@ -202,13 +202,13 @@ mod imp {
             let hout = GetStdHandle(-11);
             let mut fi: FontInfo = std::mem::zeroed();
             fi.cb_size = std::mem::size_of::<FontInfo>() as u32;
-            fi.size = Coord { x: 8, y: 8 };
-            let name: [u16; 9] = [0x54, 0x65, 0x72, 0x6D, 0x69, 0x6E, 0x61, 0x6C, 0];
+            fi.size = Coord { x: 6, y: 12 };
+            let name: [u16; 9] = [0x43, 0x6F, 0x6E, 0x73, 0x6F, 0x6C, 0x61, 0x73, 0];
             fi.face[..9].copy_from_slice(&name);
             SetCurrentConsoleFontEx(hout, 0, &fi);
             let mut cur: FontInfo = std::mem::zeroed();
             cur.cb_size = std::mem::size_of::<FontInfo>() as u32;
-            let (mut fw, mut fh) = (8i32, 8i32);
+            let (mut fw, mut fh) = (6i32, 12i32);
             if GetCurrentConsoleFontEx(hout, 0, &mut cur) != 0 && cur.size.x > 0 && cur.size.y > 0 {
                 fw = cur.size.x as i32;
                 fh = cur.size.y as i32;

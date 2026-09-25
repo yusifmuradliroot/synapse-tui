@@ -2,9 +2,13 @@
 #[path = "../../tui/src/render.rs"]
 mod render;
 #[allow(dead_code, unused_imports)]
+#[path = "../../tui/src/screen.rs"]
+mod screen;
+#[allow(dead_code, unused_imports)]
 mod term;
 
 use render::{Canvas, Solid};
+use screen::{Screen, BG_BLACK};
 use std::f64::consts::{PI, TAU};
 use std::io::Write;
 use std::sync::mpsc;
@@ -12,11 +16,9 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = env!("CARGO_BIN_NAME");
 
-// Sanal canvas: 1280x720 gri ton. Yildiz kutusu sol ustte 256x256,
-// cevresinde 1px beyaz cerceve. Geri kalan full siyah.
-const VW: usize = 1280;
-const VH: usize = 720;
-const BOX: usize = 256;
+// Scratch (blue) motoru birebir: sabit n=120 yildiz kutusu sol ustte,
+// zemin full siyah, ekranda hic yazi yok.
+const STAR_N: i32 = 120;
 
 const T_BLANK: f64 = 3.0;
 const T_SWEEP: f64 = 2.5;
@@ -28,8 +30,6 @@ const PROD_TILT: f64 = 0.18;
 const WHEEL_CRUISE: f64 = 2.2;
 const IDLE_W: f64 = 1.25663706144;
 const FRAME: Duration = Duration::from_micros(16_667);
-
-const RAMP: &[u8] = b" .:-=+*#%@";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
@@ -86,72 +86,6 @@ fn mirror_x(cv: &mut Canvas) {
     }
 }
 
-// Sanal canvas -> konsol hucreleri. Kutu disi hep siyah; kutu
-// cevresine deginen hucreler tam beyaz blok (1px cerceve gorunur kalir),
-// kutu ici gri rampa ile orneklenir.
-fn downsample(vb: &[u8], cols: usize, rows: usize, cells: &mut Vec<char>) {
-    cells.clear();
-    cells.reserve(cols * rows);
-    let b = BOX as f64;
-    for j in 0..rows {
-        let fy0 = j as f64 * VH as f64 / rows as f64;
-        let fy1 = (j + 1) as f64 * VH as f64 / rows as f64;
-        for i in 0..cols {
-            let fx0 = i as f64 * VW as f64 / cols as f64;
-            let fx1 = (i + 1) as f64 * VW as f64 / cols as f64;
-            if fx0 < b && fy0 < b && (fx0 < 1.0 || fx1 > b - 1.0 || fy0 < 1.0 || fy1 > b - 1.0) {
-                cells.push('\u{2588}');
-                continue;
-            }
-            if fx0 >= b || fy0 >= b {
-                cells.push(' ');
-                continue;
-            }
-            let ix0 = fx0.floor() as usize;
-            let iy0 = fy0.floor() as usize;
-            let mut ix1 = fx1.ceil() as usize;
-            let mut iy1 = fy1.ceil() as usize;
-            if ix1 > BOX {
-                ix1 = BOX;
-            }
-            if iy1 > BOX {
-                iy1 = BOX;
-            }
-            let mut sum = 0u32;
-            let mut cnt = 0u32;
-            for y in iy0..iy1 {
-                let row = y * VW;
-                for x in ix0..ix1 {
-                    sum += vb[row + x] as u32;
-                    cnt += 1;
-                }
-            }
-            if cnt == 0 {
-                cells.push(' ');
-                continue;
-            }
-            let avg = (sum / cnt).min(255) as usize;
-            let idx = (avg * RAMP.len() / 256).min(RAMP.len() - 1);
-            cells.push(RAMP[idx] as char);
-        }
-    }
-}
-
-// Tum hucreler beyaz on / siyah arka plan: tek renk ayari + konum + karakter.
-fn render_cells(cells: &[char], cols: usize, rows: usize, out: &mut String) {
-    out.clear();
-    out.push_str("\x1b[?2026h\x1b[H\x1b[38;2;255;255;255m\x1b[48;2;0;0;0m");
-    for j in 0..rows {
-        if j > 0 {
-            out.push_str(&format!("\x1b[{};1H", j + 1));
-        }
-        for i in 0..cols {
-            out.push(cells[j * cols + i]);
-        }
-    }
-    out.push_str("\x1b[0m\x1b[?2026l");
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -176,11 +110,10 @@ fn main() {
         }
     });
 
-    let mut vb = vec![0u8; VW * VH];
-    let mut cells: Vec<char> = Vec::new();
-    let mut frame = String::new();
+    let mut screen = Screen::new(80, 24);
+    screen.set_bg(BG_BLACK);
     let mut last_size = (0usize, 0usize);
-    let mut cv = Canvas::new_exact(BOX as i32);
+    let mut cv = Canvas::new_exact(STAR_N);
     cv.aa = 2;
     let mut phase = Phase::Blank;
     let mut pt = 0.0f64;
@@ -366,7 +299,13 @@ fn main() {
 
         let w = w.max(10);
         let h = h.max(5);
-        let nf = BOX as f64;
+        // Hedef pencere 213x60'ta tam 120; daha kucuk konsolda sigacak kadar kuculur.
+        let n = STAR_N.min(w as i32).min(h as i32 * 2).clamp(41, 256);
+        if n != cv.n {
+            cv = Canvas::new_exact(n);
+            cv.aa = 2;
+        }
+        let nf = n as f64;
         let sweep = -14.0 + (nf + 28.0) * scan_prog;
         cv.clear();
         match phase {
@@ -420,24 +359,28 @@ fn main() {
             }
         }
 
-        // Yildiz kutusunu sanal canvasin sol ustune blitle.
-        for y in 0..BOX {
-            let src = &cv.px[y * BOX..(y + 1) * BOX];
-            vb[y * VW..y * VW + BOX].copy_from_slice(src);
+        // Sol ust: hucre (0,0)'dan baslar, yari-blok (2 motor satiri = 1 hucre satiri).
+        let rows = (cv.n + 1) / 2;
+        screen.reset(w, h);
+        for j in 0..rows {
+            let y0 = 2 * j;
+            let y1 = y0 + 1;
+            for i in 0..cv.n {
+                let t = if y0 < cv.n {
+                    cv.px[(y0 * cv.n + i) as usize]
+                } else {
+                    0
+                };
+                let b = if y1 < cv.n {
+                    cv.px[(y1 * cv.n + i) as usize]
+                } else {
+                    0
+                };
+                screen.half(i, j, t, b);
+            }
         }
-        // 1px beyaz cerceve (kutu cevresi).
-        for x in 0..BOX {
-            vb[x] = 255;
-            vb[(BOX - 1) * VW + x] = 255;
-        }
-        for y in 0..BOX {
-            vb[y * VW] = 255;
-            vb[y * VW + BOX - 1] = 255;
-        }
-
-        downsample(&vb, w, h, &mut cells);
-        render_cells(&cells, w, h, &mut frame);
-        let _ = out.write_all(frame.as_bytes());
+        let buf = screen.render();
+        let _ = out.write_all(buf.as_bytes());
         let _ = out.flush();
 
         if animated {
