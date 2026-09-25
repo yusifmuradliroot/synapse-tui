@@ -17,27 +17,20 @@ use std::time::Duration;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NAME: &str = env!("CARGO_BIN_NAME");
 
-fn sample(cv: &Canvas, x: i32, y: i32) -> u8 {
-    if x < 0 || y < 0 || x >= cv.n || y >= cv.n {
-        0
-    } else {
-        cv.px[(y * cv.n + x) as usize]
-    }
-}
-
-fn blit(s: &mut Screen, cv: &Canvas, x: i32, y: i32, scale: f64) {
-    if scale <= 0.02 {
-        return;
-    }
-    let n = cv.n as f64;
-    let dw = ((n * scale).round() as i32).max(1);
-    let dh = ((n * scale).round() as i32).max(1);
-    for j in 0..(dh + 1) / 2 {
-        let sy0 = ((2.0 * j as f64) / scale).floor() as i32;
-        let sy1 = (((2.0 * j as f64 + 1.0) / scale).floor() as i32).max(sy0);
-        for i in 0..dw {
-            let sx = ((i as f64) / scale).floor() as i32;
-            s.half(x + i, y + j, sample(cv, sx, sy0), sample(cv, sx, sy1));
+fn symmetrize(cv: &mut Canvas) {
+    let n = cv.n;
+    for y in 0..(n + 1) / 2 {
+        for x in 0..(n + 1) / 2 {
+            let mx = n - 1 - x;
+            let my = n - 1 - y;
+            let m = cv.px[(y * n + x) as usize]
+                .max(cv.px[(y * n + mx) as usize])
+                .max(cv.px[(my * n + x) as usize])
+                .max(cv.px[(my * n + mx) as usize]);
+            cv.px[(y * n + x) as usize] = m;
+            cv.px[(y * n + mx) as usize] = m;
+            cv.px[(my * n + x) as usize] = m;
+            cv.px[(my * n + mx) as usize] = m;
         }
     }
 }
@@ -85,22 +78,42 @@ fn main() {
             last_size = (w, h);
             let w = w.max(10);
             let h = h.max(5);
-            let n = (w as i32).min((h as i32) * 2).clamp(41, 121);
+            let mut n = ((0.9 * (w as f64 - 1.0) / 0.50).min(0.9 * 2.0 * (h as f64 - 2.0) / 0.55)
+                as i32)
+                .clamp(41, 201);
+            if (w as i32 - n) % 2 != 0 {
+                n = if n < 201 { n + 1 } else { n - 1 };
+            }
             if n != cv.n {
-                cv = Canvas::new(n);
+                cv = Canvas::new_exact(n);
             }
             cv.clear();
             let mut p = Pass::base(0.0, 0);
             p.th_u = 0.0;
             p.th_d = 0.0;
             render::draw_pass(&mut cv, &p);
-            let nf = n as f64;
-            let max_s = ((w as f64 - 1.0) / nf).min((h as f64 * 2.0) / nf);
-            let scale = (max_s * 0.82).clamp(0.25, 2.2).min(max_s.max(0.25));
-            let bx = (w as i32 - (nf * scale) as i32) / 2;
-            let by = ((h as i32 * 2 - (nf * scale) as i32) / 4).max(0);
+            symmetrize(&mut cv);
+            let bx = (w as i32 - cv.n) / 2;
+            let rows = (cv.n + 1) / 2;
+            let by = 1 + (h as i32 - 2 - rows).max(0) / 2;
             screen.reset(w, h);
-            blit(&mut screen, &cv, bx, by, scale);
+            for j in 0..rows {
+                let y0 = 2 * j;
+                let y1 = y0 + 1;
+                for i in 0..cv.n {
+                    let t = if y0 < cv.n {
+                        cv.px[(y0 * cv.n + i) as usize]
+                    } else {
+                        0
+                    };
+                    let b = if y1 < cv.n {
+                        cv.px[(y1 * cv.n + i) as usize]
+                    } else {
+                        0
+                    };
+                    screen.half(bx + i, by + j, t, b);
+                }
+            }
             let buf = screen.render();
             let _ = out.write_all(buf.as_bytes());
             let _ = out.flush();

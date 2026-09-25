@@ -109,6 +109,17 @@ impl Canvas {
         }
     }
 
+    pub fn new_exact(n: i32) -> Canvas {
+        let n = n.max(9);
+        Canvas {
+            n,
+            cx: (n as f64 - 1.0) / 2.0,
+            cy: (n as f64 - 1.0) / 2.0,
+            r: n as f64 * 20.0 / 73.0,
+            px: vec![0; (n * n) as usize],
+        }
+    }
+
     pub fn clear(&mut self) {
         for v in self.px.iter_mut() {
             *v = 0;
