@@ -87,9 +87,11 @@ fn mirror_x(cv: &mut Canvas) {
 }
 
 fn main() {
+    let ver = env!("CARGO_PKG_VERSION");
+    let vlabel = format!("v{ver}");
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{NAME} v{}", env!("CARGO_PKG_VERSION"));
+        println!("{NAME} v{ver}");
         return;
     }
     let saved = term::raw_start();
@@ -160,6 +162,7 @@ fn main() {
                 phase = Phase::Production;
                 pt = 0.0;
                 prod_stop = None;
+                parked = true;
             } else if b == b'0' {
                 if phase == Phase::Production {
                     let yaw_t = (coin_angle / PI).round() * PI;
@@ -221,10 +224,12 @@ fn main() {
         let spin_target = if phase == Phase::Idle { 1.0 } else { 0.0 };
         let env_tau = if phase == Phase::Returning { 0.15 } else { 0.3 };
         spin_env += (spin_target - spin_env) * (1.0 - (-dt / env_tau).exp());
-        let park_target = match phase {
-            Phase::Hold if parked => 1.0,
-            Phase::Returning | Phase::Production => 1.0,
-            _ => 0.0,
+        // Park bir kez yukari tasininca (3/0 sonrasi) tum modlar ayni
+        // hizada kalir; intro (parked=false) her zaman ortalidir.
+        let park_target = if parked || phase == Phase::Returning || phase == Phase::Production {
+            1.0
+        } else {
+            0.0
         };
         let park_tau = if phase == Phase::Returning {
             0.15
@@ -379,6 +384,7 @@ fn main() {
                 screen.half(i, j, t, b);
             }
         }
+        screen.text(0, 0, &vlabel, 255);
         let buf = screen.render();
         let _ = out.write_all(buf.as_bytes());
         let _ = out.flush();
