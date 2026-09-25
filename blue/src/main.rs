@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 // Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
 // 4. kisim hotfix sayar ve 3. artinca sifirlanir.
-const HOTFIX: u32 = 0;
+const HOTFIX: u32 = 1;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
@@ -68,49 +68,9 @@ fn coin_face(cv: &mut Canvas, t: f64, ox: f64, oy: f64) {
             wob_gain: 0.0,
             ox,
             oy,
-            corner_r: 0.1,
             ..Solid::base(t)
         },
     );
-}
-
-fn bevel_edge(cv: &mut Canvas, outer: u8, inner: u8) {
-    let n = cv.n;
-    let src = cv.px.clone();
-    let at = |buf: &[u8], x: i32, y: i32| -> u8 {
-        if x < 0 || y < 0 || x >= n || y >= n {
-            0
-        } else {
-            buf[(y * n + x) as usize]
-        }
-    };
-    for y in 0..n {
-        for x in 0..n {
-            let i = (y * n + x) as usize;
-            if src[i] == 255
-                && (at(&src, x - 1, y) != 255
-                    || at(&src, x + 1, y) != 255
-                    || at(&src, x, y - 1) != 255
-                    || at(&src, x, y + 1) != 255)
-            {
-                cv.px[i] = outer;
-            }
-        }
-    }
-    let mid = cv.px.clone();
-    for y in 0..n {
-        for x in 0..n {
-            let i = (y * n + x) as usize;
-            if mid[i] == 255
-                && (at(&mid, x - 1, y) == outer
-                    || at(&mid, x + 1, y) == outer
-                    || at(&mid, x, y - 1) == outer
-                    || at(&mid, x, y + 1) == outer)
-            {
-                cv.px[i] = inner;
-            }
-        }
-    }
 }
 
 fn mirror_x(cv: &mut Canvas) {
@@ -197,11 +157,9 @@ fn main() {
                     phase = Phase::Idle;
                     pt = 0.0;
                 }
-            } else if b == b'3' && phase != Phase::Production {
+            } else if b == b'3' {
                 phase = Phase::Production;
                 pt = 0.0;
-                prod_wheel = 0.0;
-                prod_wvel = 0.0;
                 prod_stop = None;
             } else if b == b'0' {
                 if phase == Phase::Production {
@@ -325,7 +283,7 @@ fn main() {
                 let yaw_servo = ((tilt_target - coin_angle) * 4.0).clamp(-8.0, 8.0);
                 spin_vel += (yaw_servo - spin_vel) * (1.0 - (-dt / 0.15).exp());
                 coin_angle += spin_vel * dt;
-                prod_wvel += (WHEEL_CRUISE - prod_wvel) * (1.0 - (-dt / 0.4).exp());
+                prod_wvel += (WHEEL_CRUISE - prod_wvel) * (1.0 - (-dt / 0.3).exp());
                 prod_wheel += prod_wvel * dt;
             }
         }
@@ -361,18 +319,15 @@ fn main() {
                 let r = cv.r;
                 coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
                 clip_y(&mut cv, sweep - 0.4 * r, sweep);
-                bevel_edge(&mut cv, 205, 232);
                 mirror_x(&mut cv);
             }
             Phase::ScanFill => {
                 coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
                 clip_y(&mut cv, f64::MIN, sweep + 7.0);
-                bevel_edge(&mut cv, 205, 232);
                 mirror_x(&mut cv);
             }
             Phase::Hold => {
                 coin_face(&mut cv, t, 0.0, park_env * PARK_Y);
-                bevel_edge(&mut cv, 205, 232);
                 mirror_x(&mut cv);
             }
             Phase::Idle | Phase::Returning => {
@@ -384,13 +339,11 @@ fn main() {
                         angle: Some(coin_angle),
                         rim_gain: 1.0,
                         wob_gain: spin_env,
-                        corner_r: 0.1,
                         ox: spin_env * IDLE_R * wt.cos(),
                         oy: spin_env * IDLE_R * wt.sin() + park_env * PARK_Y,
                         ..Solid::base(t)
                     },
                 );
-                bevel_edge(&mut cv, 205, 232);
             }
             Phase::Production => {
                 render::draw_solid(
@@ -406,7 +359,6 @@ fn main() {
                         ..Solid::base(t)
                     },
                 );
-                bevel_edge(&mut cv, 205, 232);
             }
         }
         frame_no = frame_no.wrapping_add(1);
