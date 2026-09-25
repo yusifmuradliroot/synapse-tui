@@ -14,7 +14,9 @@ use std::io::Write;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+// Surum semasi: 1.3 sabit; 3. kisim guncellemede artar (Cargo),
+// 4. kisim hotfix sayar ve 3. artinca sifirlanir.
+const HOTFIX: u32 = 1;
 const NAME: &str = env!("CARGO_BIN_NAME");
 
 const T_BLANK: f64 = 3.0;
@@ -43,9 +45,11 @@ fn mirror_x(cv: &mut Canvas) {
 }
 
 fn main() {
+    let ver = format!("{}.{}", env!("CARGO_PKG_VERSION"), HOTFIX);
+    let vlabel = format!("v{ver}");
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{NAME} v{VERSION}");
+        println!("{NAME} v{ver}");
         return;
     }
 
@@ -186,7 +190,7 @@ fn main() {
                 screen.half(bx + i, by + j, t, b);
             }
         }
-        screen.text(0, 0, &format!("v{VERSION}"), 255);
+        screen.text(0, 0, &vlabel, 255);
         let buf = screen.render();
         let _ = out.write_all(buf.as_bytes());
         let _ = out.flush();
