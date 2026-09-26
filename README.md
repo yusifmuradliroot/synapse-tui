@@ -98,3 +98,5 @@ Başka klasörde çalışmak için programı orada başlat veya `/cd` ile geç.
 ## Lisans
 
 MIT — bkz. [LICENSE](LICENSE).
+
+!VIBE-CODED PROJECT!
