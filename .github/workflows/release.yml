@@ -49,7 +49,11 @@ jobs:
 
       - name: Android linker
         if: matrix.target == 'aarch64-linux-android'
-        run: echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+        run: |
+          CLANG="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CLANG}" >> "$GITHUB_ENV"
+          echo "TARGET_CC=${CLANG}" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=${CLANG}" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
