@@ -193,18 +193,42 @@ pub fn chat_stream(
             m.reasoning = None;
         }
     }
-    let mut body = json!({
-        "model": model,
-        "messages": msgs,
-        "stream": true,
-        "temperature": p.temp,
-        "top_p": p.top_p,
-        "usage": { "include": true },
-        "stream_options": { "include_usage": true },
-    });
-    if p.max_tokens > 0 {
-        body["max_tokens"] = json!(p.max_tokens);
-    }
+    // Saglayiciya ozel govde: NIM, OpenAI-disi alanlari reddedebilir
+    // (additionalProperties) ve tool+reasoning icin chat_template_kwargs ister.
+    // Ornekler (build.nvidia.com/nemotron-3): max_tokens + temperature/top_p sart.
+    let mut body = if p.nvidia {
+        let mt = if p.max_tokens > 0 {
+            p.max_tokens
+        } else {
+            32000
+        };
+        json!({
+            "model": model,
+            "messages": msgs,
+            "stream": true,
+            "temperature": p.temp,
+            "top_p": p.top_p,
+            "max_tokens": mt,
+            "chat_template_kwargs": {
+                "enable_thinking": true,
+                "force_nonempty_content": true
+            },
+        })
+    } else {
+        let mut b = json!({
+            "model": model,
+            "messages": msgs,
+            "stream": true,
+            "temperature": p.temp,
+            "top_p": p.top_p,
+            "usage": { "include": true },
+            "stream_options": { "include_usage": true },
+        });
+        if p.max_tokens > 0 {
+            b["max_tokens"] = json!(p.max_tokens);
+        }
+        b
+    };
     if let Some(t) = tools {
         body["tools"] = t.clone();
     }
