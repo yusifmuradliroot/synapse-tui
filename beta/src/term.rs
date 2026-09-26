@@ -116,6 +116,11 @@ mod imp {
             }
         }
     }
+
+    // Bloklayici okuma: unix'te bayt akisi zaten UTF-8'dir.
+    pub fn read_key_bytes(out: &mut Vec<u8>) {
+        out.push(read_byte());
+    }
 }
 
 #[cfg(windows)]
@@ -181,6 +186,8 @@ mod imp {
         fn SetConsoleWindowInfo(h: *mut c_void, a: i32, r: *const SmallRect) -> i32;
         fn SetCurrentConsoleFontEx(h: *mut c_void, m: i32, f: *const FontInfo) -> i32;
         fn GetCurrentConsoleFontEx(h: *mut c_void, m: i32, f: *mut FontInfo) -> i32;
+        fn ReadConsoleW(h: *mut c_void, b: *mut u16, n: u32, r: *mut u32, x: *mut c_void) -> i32;
+        fn WaitForSingleObject(h: *mut c_void, ms: u32) -> u32;
     }
 
     #[link(name = "user32")]
@@ -190,23 +197,23 @@ mod imp {
         fn MoveWindow(h: *mut c_void, x: i32, y: i32, w: i32, hgt: i32, r: i32) -> i32;
     }
 
-    extern "C" {
-        fn _getch() -> i32;
-        fn _kbhit() -> i32;
-    }
+    const WAIT_OBJECT_0: u32 = 0;
 
-    // ESC sonrasi CSI devam bayti var mi? Bloklamaz.
+    // ESC sonrasi CSI devam bayti var mi? Bloklamaz (100ms pencere).
+    // Not: sinyal yalnizca bayt uretmeyen bir kayittan (tus birakma vb.)
+    // gelmisse ReadConsoleW kisa sure bloklanabilir; sonraki giriste acar.
     pub fn poll_byte() -> Option<u8> {
         unsafe {
-            if _kbhit() == 0 {
+            let h = GetStdHandle(-10);
+            if WaitForSingleObject(h, 100) != WAIT_OBJECT_0 {
                 return None;
             }
-            let c = _getch();
-            if c < 0 {
-                None
-            } else {
-                Some(c as u8)
+            let mut w = 0u16;
+            let mut n = 0u32;
+            if ReadConsoleW(h, &mut w, 1, &mut n, std::ptr::null_mut()) != 0 && n == 1 && w < 0x80 {
+                return Some(w as u8);
             }
+            None
         }
     }
 
@@ -230,7 +237,10 @@ mod imp {
             const QUICK_EDIT: u32 = 0x0040;
             const EXTENDED_FLAGS: u32 = 0x0080;
             const VT_INPUT: u32 = 0x0200;
-            let raw = (im & !(LINE_INPUT | ECHO_INPUT | QUICK_EDIT)) | EXTENDED_FLAGS | VT_INPUT;
+            const PROCESSED_INPUT: u32 = 0x0001;
+            let raw = (im & !(LINE_INPUT | ECHO_INPUT | QUICK_EDIT | PROCESSED_INPUT))
+                | EXTENDED_FLAGS
+                | VT_INPUT;
             SetConsoleMode(hin, raw);
             Saved { out: om, inp: im }
         }
@@ -312,19 +322,27 @@ mod imp {
         }
     }
 
-    pub fn read_byte() -> u8 {
+    // Bloklayici okuma: 1 tus → 1+ bayt (ASCII tek bayt, digerleri UTF-8).
+    // VT_INPUT acikken ReadConsoleW; fare dahil VT dizileri ASCII gelir.
+    pub fn read_key_bytes(out: &mut Vec<u8>) {
         unsafe {
-            let c = _getch();
-            if c < 0 {
-                0
-            } else if c == 0 {
-                let _ = _getch();
-                0
-            } else {
-                c as u8
+            let h = GetStdHandle(-10);
+            loop {
+                let mut w = 0u16;
+                let mut n = 0u32;
+                if ReadConsoleW(h, &mut w, 1, &mut n, std::ptr::null_mut()) != 0 && n == 1 {
+                    if w < 0x80 {
+                        out.push(w as u8);
+                    } else {
+                        let c = char::from_u32(w as u32).unwrap_or('\u{FFFD}');
+                        let mut tmp = [0u8; 4];
+                        out.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+                    }
+                    return;
+                }
             }
         }
     }
 }
 
-pub use imp::{poll_byte, raw_start, raw_stop, read_byte, set_fullscreen, setup_window, size};
+pub use imp::{poll_byte, raw_start, raw_stop, read_key_bytes, set_fullscreen, setup_window, size};

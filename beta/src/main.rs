@@ -152,47 +152,58 @@ fn main() {
     let _ = out.flush();
 
     let (tx, rx) = mpsc::channel::<Event>();
-    std::thread::spawn(move || loop {
-        let b = term::read_byte();
-        if b == 0 {
-            std::thread::sleep(Duration::from_millis(2));
-            continue;
-        }
-        if b != 0x1b {
-            if tx.send(Event::Key(b)).is_err() {
-                return;
+    std::thread::spawn(move || {
+        let mut tmp = Vec::new();
+        loop {
+            tmp.clear();
+            term::read_key_bytes(&mut tmp);
+            if tmp.len() == 1 && tmp[0] == 0 {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
             }
-            continue;
-        }
-        // ESC: tek basina mi, CSI dizisi mi?
-        let nb = match term::poll_byte() {
-            Some(v) => v,
-            None => {
-                if tx.send(Event::Key(0x1b)).is_err() {
+            if tmp.len() != 1 || tmp[0] != 0x1b {
+                let mut dead = false;
+                for b in tmp.iter() {
+                    if tx.send(Event::Key(*b)).is_err() {
+                        dead = true;
+                        break;
+                    }
+                }
+                if dead {
                     return;
                 }
                 continue;
             }
-        };
-        if nb != b'[' {
-            // ESC + baska bayt (Alt-kombo): ikisini de tus olarak ver.
-            if tx.send(Event::Key(0x1b)).is_err() {
-                return;
-            }
-            if tx.send(Event::Key(nb)).is_err() {
-                return;
-            }
-            continue;
-        }
-        // CSI: SGR mouse ise olaya cevir, degilse yok say.
-        if let Some(f) = term::poll_byte() {
-            if let Some((cb, col, row, rel)) = parse_sgr_mouse(f) {
-                if tx.send(Event::Mouse(cb, col, row, rel)).is_err() {
+            // ESC: tek basina mi, CSI dizisi mi?
+            let nb = match term::poll_byte() {
+                Some(v) => v,
+                None => {
+                    if tx.send(Event::Key(0x1b)).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            if nb != b'[' {
+                // ESC + baska bayt (Alt-kombo): ikisini de tus olarak ver.
+                if tx.send(Event::Key(0x1b)).is_err() {
                     return;
                 }
+                if tx.send(Event::Key(nb)).is_err() {
+                    return;
+                }
+                continue;
             }
-        } else if tx.send(Event::Key(0x1b)).is_err() {
-            return;
+            // CSI: SGR mouse ise olaya cevir, degilse yok say.
+            if let Some(f) = term::poll_byte() {
+                if let Some((cb, col, row, rel)) = parse_sgr_mouse(f) {
+                    if tx.send(Event::Mouse(cb, col, row, rel)).is_err() {
+                        return;
+                    }
+                }
+            } else if tx.send(Event::Key(0x1b)).is_err() {
+                return;
+            }
         }
     });
 
@@ -258,7 +269,17 @@ fn main() {
                         chat_dirty = true;
                     }
                     127 | 8 => {
-                        input_buf.pop();
+                        // UTF-8 guvenli sil: ASCII ise tek pop yeter; cok
+                        // baytli kuyruktan basladiysak basa kadar temizle.
+                        let first = input_buf.pop();
+                        if matches!(first, Some(b) if b & 0xC0 == 0x80) {
+                            while matches!(input_buf.last(), Some(b) if b & 0xC0 == 0x80) {
+                                input_buf.pop();
+                            }
+                            if matches!(input_buf.last(), Some(b) if *b >= 0xC0) {
+                                input_buf.pop();
+                            }
+                        }
                         chat_dirty = true;
                     }
                     0x1b => {
@@ -320,6 +341,10 @@ fn main() {
                             hold_auto = false;
                             parked = true;
                         }
+                    } else if b == b'\t' {
+                        // Klavye yedegi: fare calismasa bile giris kutusuna odaklan.
+                        input_focus = true;
+                        chat_dirty = true;
                     } else if b == b'q' || b == 0x1b || b == 3 {
                         term::raw_stop(&saved);
                         let _ = out.write_all(b"\x1b[?25h\x1b[0m\x1b[?1000l\x1b[?1006l\x1b[?1049l");
@@ -556,7 +581,7 @@ fn main() {
             let skip = ib.chars().count().saturating_sub(kept);
             let typed: String = ib.chars().skip(skip).collect();
             let (content, cval) = if input_buf.is_empty() && !input_focus {
-                ("yazmak için tıkla".to_string(), 140u8)
+                ("yazmak için TAB / tıkla".to_string(), 140u8)
             } else if input_focus {
                 (format!("> {typed}"), 255u8)
             } else {
