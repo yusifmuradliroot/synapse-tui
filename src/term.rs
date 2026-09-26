@@ -1,5 +1,7 @@
 #[cfg(unix)]
 mod imp {
+    // Linux/Android (glibc/bionic) termios gorunumu. Test edildi, dokunma.
+    #[cfg(not(target_os = "macos"))]
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct Termios {
@@ -12,6 +14,36 @@ mod imp {
         pub c_ispeed: u32,
         pub c_ospeed: u32,
     }
+
+    // macOS termios gorunumu: 4x u64 flag, c_cc[20], 2x u64 hiz.
+    // (c_line alani yoktur; yerlesim C header ile birebir eslesir.)
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct Termios {
+        pub c_iflag: u64,
+        pub c_oflag: u64,
+        pub c_cflag: u64,
+        pub c_lflag: u64,
+        pub c_cc: [u8; 20],
+        pub c_ispeed: u64,
+        pub c_ospeed: u64,
+    }
+
+    #[cfg(target_os = "macos")]
+    const TIOCGWINSZ: u64 = 0x4008_7468;
+    #[cfg(not(target_os = "macos"))]
+    const TIOCGWINSZ: u64 = 0x5413;
+
+    // VMIN/VTIME indisleri: Linux'ta 6/5, macOS'ta 16/17.
+    #[cfg(target_os = "macos")]
+    const VMIN: usize = 16;
+    #[cfg(not(target_os = "macos"))]
+    const VMIN: usize = 6;
+    #[cfg(target_os = "macos")]
+    const VTIME: usize = 17;
+    #[cfg(not(target_os = "macos"))]
+    const VTIME: usize = 5;
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -27,12 +59,15 @@ mod imp {
         fn tcsetattr(fd: i32, a: i32, t: *const Termios) -> i32;
         fn ioctl(fd: i32, req: u64, ...) -> i32;
         fn read(fd: i32, buf: *mut u8, n: usize) -> isize;
+        #[cfg(target_os = "macos")]
+        fn cfmakeraw(t: *mut Termios);
     }
 
     pub struct Saved {
         pub t: Termios,
     }
 
+    #[cfg(not(target_os = "macos"))]
     pub fn raw_start() -> Saved {
         unsafe {
             let mut orig: Termios = std::mem::zeroed();
@@ -43,8 +78,23 @@ mod imp {
             raw.c_lflag &= !(0o1 | 0o2 | 0o10 | 0o100 | 0o100000);
             raw.c_cflag &= !(0o60 | 0o400);
             raw.c_cflag |= 0o60;
-            raw.c_cc[6] = 1;
-            raw.c_cc[5] = 0;
+            raw.c_cc[VMIN] = 1;
+            raw.c_cc[VTIME] = 0;
+            tcsetattr(0, 0, &raw);
+            Saved { t: orig }
+        }
+    }
+
+    // macOS: tasinabilir cfmakeraw + VMIN/VTIME (sabit ezberi yok).
+    #[cfg(target_os = "macos")]
+    pub fn raw_start() -> Saved {
+        unsafe {
+            let mut orig: Termios = std::mem::zeroed();
+            tcgetattr(0, &mut orig);
+            let mut raw = orig;
+            cfmakeraw(&mut raw);
+            raw.c_cc[VMIN] = 1;
+            raw.c_cc[VTIME] = 0;
             tcsetattr(0, 0, &raw);
             Saved { t: orig }
         }
@@ -99,7 +149,7 @@ mod imp {
     pub fn size() -> (usize, usize) {
         unsafe {
             let mut ws = Winsize::default();
-            if ioctl(1, 0x5413, &mut ws as *mut Winsize) == 0 && ws.col > 0 && ws.row > 0 {
+            if ioctl(1, TIOCGWINSZ, &mut ws as *mut Winsize) == 0 && ws.col > 0 && ws.row > 0 {
                 return (ws.col as usize, ws.row as usize);
             }
             (80, 24)
@@ -132,6 +182,8 @@ mod imp {
             ("wl-paste", &["--no-newline"]),
             ("xclip", &["-o", "-selection", "clipboard"]),
             ("xsel", &["--clipboard", "--output"]),
+            ("pbpaste", &[]),
+            ("termux-clipboard-get", &[]),
         ];
         for (prog, args) in tries {
             let mut c = match std::process::Command::new(prog)

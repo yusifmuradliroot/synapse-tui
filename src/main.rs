@@ -3,10 +3,8 @@
 //   Waiting  -> static (Hold)      Thinking -> idle spin (Idle)
 //   Working  -> wheel (Production)  Boot     -> intro reveal
 #[allow(dead_code, unused_imports)]
-#[path = "../../tui/src/render.rs"]
 mod render;
 #[allow(dead_code, unused_imports)]
-#[path = "../../tui/src/screen.rs"]
 mod screen;
 #[allow(dead_code, unused_imports)]
 mod term;
@@ -198,12 +196,11 @@ fn clean(s: &str) -> String {
                         match ch.next() {
                             None => break,
                             Some('\x07') => break,
-                            Some('\x1b') => {
-                                if ch.peek() == Some(&'\\') {
-                                    ch.next();
-                                    break;
-                                }
+                            Some('\x1b') if ch.peek() == Some(&'\\') => {
+                                ch.next();
+                                break;
                             }
+                            Some('\x1b') => {}
                             _ => {}
                         }
                     }
@@ -624,6 +621,8 @@ fn picker_event(app: &mut App, ev: Ev) {
     }
 }
 
+type BtnHit = Vec<(i32, Vec<(i32, i32, usize)>)>;
+
 struct AskModal {
     id: u32,
     label: String,
@@ -632,7 +631,7 @@ struct AskModal {
     buf: Vec<u8>,
     buttons: bool,
     sel: usize,
-    btn_rows: Vec<(i32, Vec<(i32, i32, usize)>)>,
+    btn_rows: BtnHit,
 }
 
 fn modal_submit(app: &mut App, ctx: &mpsc::Sender<Cmd>, text: String) {
@@ -772,7 +771,7 @@ fn ask_modal_event(app: &mut App, ev: Ev, ctx: &mpsc::Sender<Cmd>) {
                 0x1b => {
                     modal_submit(app, ctx, String::new());
                 }
-                b if b >= b'1' && b <= b'9' => {
+                b if (b'1'..=b'9').contains(&b) => {
                     let i = (b - b'1') as usize;
                     if let Some(m) = app.ask_modal.as_mut() {
                         if i < m.options.len() {
@@ -2188,11 +2187,8 @@ fn main() {
             }
             // izin/soru modali (en ustte)
             app.ask_pos = None;
-            if app.ask_modal.is_some() {
-                let lay = {
-                    let m = app.ask_modal.as_ref().unwrap();
-                    modal_layout(m, cw, h)
-                };
+            if let Some(m) = app.ask_modal.as_ref() {
+                let lay = modal_layout(m, cw, h);
                 for (r, (txt, v)) in lay.head.iter().enumerate() {
                     let s: String = clean(txt).chars().take(cw).collect();
                     screen.text(x0i, lay.start + r as i32, &s, *v);

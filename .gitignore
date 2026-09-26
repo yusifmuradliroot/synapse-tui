@@ -1,3 +1,4 @@
 target/
 *.pdb
-distilled/target/
+*.exe
+server.log

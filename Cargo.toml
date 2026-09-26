@@ -1,7 +1,10 @@
 [package]
 name = "synapse-distilled"
-version = "0.5.0"
+version = "1.0.0"
 edition = "2021"
+description = "Terminalde calisan evrensel AI kod asistani (Windows, Linux, macOS, Termux)"
+license = "MIT"
+repository = "https://github.com/yusifmuradliroot/synapse-tui"
 autobins = false
 
 [[bin]]
