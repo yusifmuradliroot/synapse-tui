@@ -24,7 +24,6 @@ use screen::{Screen, BG_BLACK};
 use session::Session;
 use std::f64::consts::TAU;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -1103,7 +1102,7 @@ fn settings_event(app: &mut App, ev: Ev) {
 }
 
 fn help_text() -> &'static str {
-    "/help /model /settings /provider openrouter|nvidia /run <cmd> /init /new /sessions /resume <id> /compact /context /clear \
+    "/help /model /settings /provider openrouter|nvidia /run <cmd> /cd <dir> /init /new /sessions /resume <id> /compact /context /clear \
 /key /tools /thinking /m /c /quit\n\
 keys: TAB focus chat · ! shell mode · Ctrl+V paste · wheel scroll · q quit"
 }
@@ -1240,6 +1239,27 @@ fn slash(
                 start_shell(app, arg);
             }
         }
+        "cd" => {
+            if arg.is_empty() {
+                app.meta(&format!("workspace: {}", app.cfg.workspace));
+            } else {
+                let p = std::path::PathBuf::from(&arg);
+                let full = if p.is_absolute() {
+                    p
+                } else {
+                    std::path::PathBuf::from(&app.cfg.workspace).join(&p)
+                };
+                match full.canonicalize() {
+                    Ok(c) if c.is_dir() => {
+                        app.cfg.workspace = c.to_string_lossy().into_owned();
+                        let _ = config::save(&app.cfg);
+                        app.meta(&format!("workspace: {}", app.cfg.workspace));
+                    }
+                    Ok(_) => app.meta(&format!("not a directory: {arg}")),
+                    Err(e) => app.meta(&format!("cannot access {arg}: {e}")),
+                }
+            }
+        }
         "m" => {
             app.view_mode = if app.view_mode == View::Star {
                 View::Split
@@ -1349,7 +1369,6 @@ fn main() {
     if let Some(m) = model_override {
         cfg.model = m;
     }
-    let ws = PathBuf::from(&cfg.workspace);
 
     let mut sess = session_override
         .as_ref()
@@ -1441,7 +1460,7 @@ fn main() {
     let (ctx, ctx_rx) = mpsc::channel::<Cmd>();
     let (mtx, mrx) = mpsc::channel::<Vec<String>>();
     let no_key = !config::has_key(&cfg);
-    let wtx = agent::spawn(ctx_rx, ws.clone());
+    let wtx = agent::spawn(ctx_rx);
 
     let mut app = App {
         cfg,

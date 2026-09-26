@@ -5,7 +5,7 @@ use crate::config::MAX_ITER;
 use crate::session::Session;
 use crate::tools;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -446,7 +446,7 @@ fn ask_round(
     }
 }
 
-pub fn spawn(cmd_rx: mpsc::Receiver<Cmd>, ws: PathBuf) -> mpsc::Receiver<WEvent> {
+pub fn spawn(cmd_rx: mpsc::Receiver<Cmd>) -> mpsc::Receiver<WEvent> {
     let (tx, rx) = mpsc::channel::<WEvent>();
     std::thread::spawn(move || {
         let mut rt = Rt::new();
@@ -487,7 +487,7 @@ pub fn spawn(cmd_rx: mpsc::Receiver<Cmd>, ws: PathBuf) -> mpsc::Receiver<WEvent>
                         continue;
                     }
                     sess.messages.push(Message::user(text.trim()));
-                    run_turn(&tx, &cmd_rx, &mut rt, &prov, &model, &ws, &cfg, &mut sess);
+                    run_turn(&tx, &cmd_rx, &mut rt, &prov, &model, &cfg, &mut sess);
                     let _ = tx.send(WEvent::Sess(Box::new(sess)));
                     let _ = tx.send(WEvent::State(AState::Waiting));
                     let _ = tx.send(WEvent::Done);
@@ -507,11 +507,12 @@ fn run_turn(
     rt: &mut Rt,
     prov: &api::Prov,
     model: &str,
-    ws: &Path,
     cfg: &crate::config::Config,
     sess: &mut Session,
 ) {
     let tools_on = cfg.tools_enabled;
+    let ws = std::path::PathBuf::from(&cfg.workspace);
+    let ws = ws.as_path();
     let sys = system_prompt(ws);
     let tool_schema = if tools_on { Some(tools::all()) } else { None };
     for iter in 0..MAX_ITER {

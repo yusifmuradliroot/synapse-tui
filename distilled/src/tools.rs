@@ -155,32 +155,85 @@ pub fn resolve(ws: &Path, p: &str) -> PathBuf {
 }
 
 // Yazma icin: workspace disina cikmayi engelle.
+fn normalize_lexical(x: &Path) -> PathBuf {
+    let mut o = PathBuf::new();
+    for c in x.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                o.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => o.push(other.as_os_str()),
+        }
+    }
+    o
+}
+
+// En yakin var olan atayi canonicalize edip kalani ekler.
+// (Olusacak dosyanin kendisi henuz yoktur; ebeveyni vardir.)
+fn canonicalize_best(p: &Path) -> PathBuf {
+    let mut cur = p.to_path_buf();
+    let mut rest = Vec::new();
+    loop {
+        match cur.canonicalize() {
+            Ok(c) => {
+                let mut out = c;
+                for comp in rest.iter().rev() {
+                    out.push(comp);
+                }
+                return out;
+            }
+            Err(_) => match cur.file_name() {
+                Some(n) => {
+                    rest.push(n.to_os_string());
+                    if !cur.pop() {
+                        return normalize_lexical(p);
+                    }
+                }
+                None => return normalize_lexical(p),
+            },
+        }
+    }
+}
+
+// Windows verbatim öneki (\\?\) karsilastirmayi bozar; sok.
+fn strip_unc(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    p.to_path_buf()
+}
+
 fn resolve_write(ws: &Path, p: &str) -> Result<PathBuf, String> {
     let full = resolve(ws, p);
-    let canon = |x: &Path| -> PathBuf {
-        x.canonicalize().unwrap_or_else(|_| {
-            let mut o = PathBuf::new();
-            for c in x.components() {
-                match c {
-                    std::path::Component::ParentDir => {
-                        o.pop();
-                    }
-                    std::path::Component::CurDir => {}
-                    other => o.push(other.as_os_str()),
-                }
-            }
-            o
-        })
-    };
-    let f = canon(&full);
-    let w = canon(ws);
-    if !f.starts_with(&w) {
-        return Err(format!(
-            "refused: path is outside the workspace ({})",
-            f.display()
-        ));
+    let canon_full = canonicalize_best(&full);
+    let canon_ws = canonicalize_best(ws);
+    let f = strip_unc(&canon_full);
+    let w = strip_unc(&canon_ws);
+    #[cfg(windows)]
+    {
+        // Windows dosya sistemi buyuk/kucuk harf duyarsizdir.
+        let fl = f.to_string_lossy().to_lowercase();
+        let wl = w.to_string_lossy().to_lowercase();
+        if PathBuf::from(&fl).starts_with(&wl) {
+            return Ok(canon_full);
+        }
     }
-    Ok(f)
+    #[cfg(not(windows))]
+    {
+        if f.starts_with(&w) {
+            return Ok(canon_full);
+        }
+    }
+    Err(format!(
+        "refused: {} is outside the workspace ({}). Run the app there or /cd into it.",
+        full.display(),
+        ws.display()
+    ))
 }
 
 fn arg_str(a: &Value, k: &str) -> String {
@@ -1805,6 +1858,58 @@ mod ext_tests {
             &w,
         );
         assert!(r.contains("not found") && r.contains("similar line"), "{r}");
+        let _ = std::fs::remove_dir_all(&w);
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn strip_unc_prefix() {
+        assert_eq!(
+            strip_unc(&PathBuf::from(r"\\?\C:\Users\x")),
+            PathBuf::from(r"C:\Users\x")
+        );
+        assert_eq!(
+            strip_unc(&PathBuf::from(r"\\?\UNC\srv\sh\x")),
+            PathBuf::from(r"\\srv\sh\x")
+        );
+        assert_eq!(strip_unc(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
+    }
+
+    #[test]
+    fn best_ancestor_for_new_file() {
+        let w = std::env::temp_dir().join(format!("sd-best-{}", crate::session::now()));
+        let _ = std::fs::remove_dir_all(&w);
+        std::fs::create_dir_all(w.join("sub")).unwrap();
+        // var olmayan dosya: ebeveyn uzerinden cozulur
+        let got = canonicalize_best(&w.join("sub").join("new.txt"));
+        assert_eq!(got, w.join("sub").join("new.txt"));
+        // iki katman yok: en yakin ata
+        let got = canonicalize_best(&w.join("a").join("b").join("c.txt"));
+        assert_eq!(got, w.join("a").join("b").join("c.txt"));
+        let _ = std::fs::remove_dir_all(&w);
+    }
+
+    #[test]
+    fn write_nested_and_deny_escape() {
+        let w = std::env::temp_dir().join(format!("sd-nest-{}", crate::session::now()));
+        let _ = std::fs::remove_dir_all(&w);
+        std::fs::create_dir_all(&w).unwrap();
+        let r = run("write_file", r#"{"path":"a/b/c.txt","content":"deep"}"#, &w);
+        assert!(r.starts_with("ok:"), "{r}");
+        assert_eq!(
+            std::fs::read_to_string(w.join("a/b/c.txt")).unwrap(),
+            "deep"
+        );
+        let r = run(
+            "write_file",
+            r#"{"path":"../escape.txt","content":"x"}"#,
+            &w,
+        );
+        assert!(r.starts_with("error: refused"), "{r}");
         let _ = std::fs::remove_dir_all(&w);
     }
 }
