@@ -137,6 +137,8 @@ impl VK {
 enum Ev {
     Key(u8),
     Mouse(u32, i32, i32, bool),
+    Up,
+    Down,
 }
 
 fn parse_sgr_mouse(first: u8) -> Option<(u32, i32, i32, bool)> {
@@ -244,6 +246,7 @@ struct App {
     last_panel: Option<(usize, usize)>,
     last_w: usize,
     last_h: usize,
+    picker: Option<Picker>,
 }
 impl App {
     fn say(&mut self, s: &str, k: VK) {
@@ -294,10 +297,216 @@ fn flush_text(app: &mut App) {
     app.live_text.clear();
 }
 
+// UTF-8 guvenli tek karakter sil (capture/chat/custom girislerde ortak).
+fn pop_utf8(buf: &mut Vec<u8>) {
+    let first = buf.pop();
+    if matches!(first, Some(b) if b & 0xC0 == 0x80) {
+        while matches!(buf.last(), Some(b) if b & 0xC0 == 0x80) {
+            buf.pop();
+        }
+        if matches!(buf.last(), Some(b) if *b >= 0xC0) {
+            buf.pop();
+        }
+    }
+}
+
+// Panoya/yapistirmayi hedef tampona ekle (limitli). Tek satirsa ilk satir.
+fn paste_into(buf: &mut Vec<u8>, cap: usize, single_line: bool) {
+    let Some(t) = term::clipboard_text() else {
+        return;
+    };
+    let flat = if single_line {
+        t.lines().next().unwrap_or("").trim().to_string()
+    } else {
+        t.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    for b in flat.bytes() {
+        if buf.len() >= cap {
+            break;
+        }
+        buf.push(b);
+    }
+}
+
+// ── model secici ────────────────────────────────────────────────
+const CUSTOM_ENTRY: &str = "[type a custom model id…]";
+
+struct Picker {
+    customs: Vec<String>,
+    fetched: Vec<String>,
+    error: Option<String>,
+    sel: usize,
+    scroll: usize,
+    custom_mode: bool,
+    custom_buf: Vec<u8>,
+    prompt_row: Option<i32>,
+}
+
+impl Picker {
+    fn len(&self) -> usize {
+        self.customs.len() + self.fetched.len() + 1
+    }
+    fn id_at(&self, i: usize) -> Option<String> {
+        if i < self.customs.len() {
+            Some(self.customs[i].clone())
+        } else if i < self.customs.len() + self.fetched.len() {
+            Some(self.fetched[i - self.customs.len()].clone())
+        } else {
+            None
+        }
+    }
+}
+
+fn open_picker(app: &mut App, mtx: &mpsc::Sender<Vec<String>>) {
+    app.focus = false;
+    app.picker = Some(Picker {
+        customs: app.cfg.custom_models.clone(),
+        fetched: Vec::new(),
+        error: None,
+        sel: 0,
+        scroll: 0,
+        custom_mode: false,
+        custom_buf: Vec::new(),
+        prompt_row: None,
+    });
+    let key = app.cfg.api_key.clone();
+    let tx = mtx.clone();
+    std::thread::spawn(move || {
+        let out = match api::models(&key) {
+            Ok(ms) => ms.into_iter().map(|(id, _)| id).take(120).collect(),
+            Err(e) => vec![format!("error: {e}")],
+        };
+        let _ = tx.send(out);
+    });
+    app.meta("fetching model list… (Up/Down + Enter, c custom, Esc cancel)");
+}
+
+fn apply_model(app: &mut App, id: &str) {
+    app.cfg.model = id.to_string();
+    app.sess.model = id.to_string();
+    let _ = config::save(&app.cfg);
+    app.meta(&format!("model set: {id}"));
+    app.picker = None;
+}
+
+fn picker_confirm(app: &mut App) {
+    let total = match app.picker.as_ref() {
+        Some(p) => p.customs.len() + p.fetched.len(),
+        None => return,
+    };
+    let sel = app.picker.as_ref().map(|p| p.sel).unwrap_or(0);
+    if sel >= total {
+        if let Some(p) = app.picker.as_mut() {
+            p.custom_mode = true;
+            p.custom_buf.clear();
+        }
+        return;
+    }
+    if let Some(id) = app.picker.as_ref().and_then(|p| p.id_at(sel)) {
+        apply_model(app, &id);
+    }
+}
+
+fn picker_custom_ok(app: &mut App) {
+    let id = match app.picker.as_ref() {
+        Some(p) => String::from_utf8_lossy(&p.custom_buf).trim().to_string(),
+        None => return,
+    };
+    if id.is_empty() {
+        return;
+    }
+    if !app.cfg.custom_models.contains(&id) {
+        app.cfg.custom_models.push(id.clone());
+        app.cfg.custom_models.truncate(20);
+    }
+    apply_model(app, &id);
+}
+
+fn picker_event(app: &mut App, ev: Ev) {
+    let Some(p) = app.picker.as_mut() else {
+        return;
+    };
+    match ev {
+        Ev::Up => {
+            if !p.custom_mode {
+                p.sel = p.sel.saturating_sub(1);
+            }
+        }
+        Ev::Down => {
+            if !p.custom_mode && p.sel + 1 < p.len() {
+                p.sel += 1;
+            }
+        }
+        Ev::Mouse(cb, col, row, rel) => {
+            if cb & 64 != 0 {
+                if p.custom_mode {
+                    return;
+                }
+                if cb & 1 == 0 {
+                    p.sel = p.sel.saturating_sub(3);
+                } else if p.sel + 3 < p.len() {
+                    p.sel += 3;
+                } else if p.len() > 0 {
+                    p.sel = p.len() - 1;
+                }
+                return;
+            }
+            if rel {
+                return;
+            }
+            // tiklama: liste satiri -> sec+onayla, custom satiri -> custom mod
+            if let Some(pr) = p.prompt_row {
+                let (x0, _) = app.last_panel.unwrap_or((0, 0));
+                if col >= x0 as i32 && row == pr {
+                    p.custom_mode = true;
+                    p.custom_buf.clear();
+                    return;
+                }
+            }
+            let (x0, _) = app.last_panel.unwrap_or((0, 0));
+            if col < x0 as i32 || row < 2 {
+                return;
+            }
+            let idx = p.scroll + (row - 2) as usize;
+            if idx < p.len() {
+                p.sel = idx;
+                picker_confirm(app);
+            }
+        }
+        Ev::Key(b) => {
+            if p.custom_mode {
+                match b {
+                    13 | 10 => picker_custom_ok(app),
+                    0x1b => {
+                        p.custom_mode = false;
+                        p.custom_buf.clear();
+                    }
+                    127 | 8 => pop_utf8(&mut p.custom_buf),
+                    22 => paste_into(&mut p.custom_buf, 120, true),
+                    _ if b >= 32 && p.custom_buf.len() < 120 => p.custom_buf.push(b),
+                    _ => {}
+                }
+            } else {
+                match b {
+                    13 | 10 => picker_confirm(app),
+                    0x1b => {
+                        app.picker = None;
+                    }
+                    b'c' | b'C' => {
+                        p.custom_mode = true;
+                        p.custom_buf.clear();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 fn help_text() -> &'static str {
-    "/help /model [id] /models /new /sessions /resume <id> /compact /context /clear \
+    "/help /model /model <id> /new /sessions /resume <id> /compact /context /clear \
 /key /tools /thinking /m /c /quit\n\
-keys: 0 stop 1 restart 2 idle 3 production · TAB focus chat · wheel scroll · q quit"
+keys: TAB focus chat · Ctrl+V paste · wheel scroll · q quit"
 }
 
 fn slash(
@@ -312,16 +521,6 @@ fn slash(
     match cmd.as_str() {
         "help" | "?" => app.say(help_text(), VK::Hint),
         "quit" | "exit" => return true,
-        "model" => {
-            if arg.is_empty() {
-                app.meta(&format!("model: {}", app.cfg.model));
-            } else {
-                app.cfg.model = arg.clone();
-                app.sess.model = arg.clone();
-                let _ = config::save(&app.cfg);
-                app.meta(&format!("model set: {arg}"));
-            }
-        }
         "new" => {
             let s = session::new_session(&app.cfg.model);
             app.meta(&format!("new session {}", s.id));
@@ -436,33 +635,19 @@ fn slash(
         "compact" => {
             let _ = tx.send(Cmd::Compact {
                 sess: app.sess.clone(),
+                key: app.cfg.api_key.clone(),
+                model: app.cfg.model.clone(),
             });
             app.meta("compacting context…");
         }
-        "models" => {
-            let key = app.cfg.api_key.clone();
-            let tx = mtx.clone();
-            let _ = tx.send(Vec::new());
-            std::thread::spawn(move || {
-                let out = match api::models(&key) {
-                    Ok(ms) => ms
-                        .into_iter()
-                        .map(|(id, _)| id)
-                        .filter(|id| {
-                            id.contains("claude")
-                                || id.contains("gpt")
-                                || id.contains("gemini")
-                                || id.contains("deepseek")
-                                || id.contains("qwen")
-                                || id.contains("llama")
-                        })
-                        .take(60)
-                        .collect(),
-                    Err(e) => vec![format!("error: {e}")],
-                };
-                let _ = tx.send(out);
-            });
-            app.meta("fetching model list from OpenRouter…");
+        "models" | "model" if arg.is_empty() => {
+            open_picker(app, mtx);
+        }
+        "model" => {
+            app.cfg.model = arg.clone();
+            app.sess.model = arg.clone();
+            let _ = config::save(&app.cfg);
+            app.meta(&format!("model set: {arg}"));
         }
         _ => {
             if cmd.is_empty() {
@@ -562,13 +747,30 @@ fn main() {
                     continue;
                 }
             };
+            if nb == b'O' {
+                // SS3 ok tuslari (Windows VT): ESC O A / ESC O B
+                match term::poll_byte() {
+                    Some(b'A') => {
+                        let _ = etx.send(Ev::Up);
+                    }
+                    Some(b'B') => {
+                        let _ = etx.send(Ev::Down);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if nb != b'[' {
                 let _ = etx.send(Ev::Key(0x1b));
                 let _ = etx.send(Ev::Key(nb));
                 continue;
             }
             if let Some(f) = term::poll_byte() {
-                if let Some((cb, col, row, rel)) = parse_sgr_mouse(f) {
+                if f == b'A' {
+                    let _ = etx.send(Ev::Up);
+                } else if f == b'B' {
+                    let _ = etx.send(Ev::Down);
+                } else if let Some((cb, col, row, rel)) = parse_sgr_mouse(f) {
                     let _ = etx.send(Ev::Mouse(cb, col, row, rel));
                 }
             } else {
@@ -580,17 +782,7 @@ fn main() {
     let (ctx, ctx_rx) = mpsc::channel::<Cmd>();
     let (mtx, mrx) = mpsc::channel::<Vec<String>>();
     let no_key = !config::has_key(&cfg);
-    let wtx = if no_key {
-        mpsc::channel::<WEvent>().1
-    } else {
-        agent::spawn(
-            ctx_rx,
-            cfg.api_key.clone(),
-            cfg.model.clone(),
-            ws.clone(),
-            cfg.tools_enabled,
-        )
-    };
+    let wtx = agent::spawn(ctx_rx, ws.clone());
 
     let mut app = App {
         cfg,
@@ -618,6 +810,7 @@ fn main() {
         last_panel: None,
         last_w: 0,
         last_h: 0,
+        picker: None,
     };
     if no_key {
         app.say(
@@ -659,6 +852,11 @@ fn main() {
         let mut dirty = false;
         while let Ok(ev) = erx.try_recv() {
             match ev {
+                ev if app.picker.is_some() => {
+                    picker_event(&mut app, ev);
+                    dirty = true;
+                }
+                Ev::Up | Ev::Down => {}
                 Ev::Mouse(cb, col, row, rel) => {
                     if cb & 64 != 0 {
                         if cb & 1 == 0 {
@@ -702,18 +900,14 @@ fn main() {
                         dirty = true;
                     }
                     127 | 8 => {
-                        let first = app.buf.pop();
-                        if first.is_some_and(|b| b & 0xC0 == 0x80) {
-                            while app.buf.last().is_some_and(|b| b & 0xC0 == 0x80) {
-                                app.buf.pop();
-                            }
-                            if app.buf.last().is_some_and(|b| *b >= 0xC0) {
-                                app.buf.pop();
-                            }
-                        }
+                        pop_utf8(&mut app.buf);
                         dirty = true;
                     }
                     3 => quit = true,
+                    22 => {
+                        paste_into(&mut app.buf, 256, true);
+                        dirty = true;
+                    }
                     _ if b >= 32 && app.buf.len() < 256 => {
                         app.buf.push(b);
                         dirty = true;
@@ -735,25 +929,24 @@ fn main() {
                                 let _ = ctx.send(Cmd::Ask {
                                     text: line,
                                     sess: app.sess.clone(),
+                                    key: app.cfg.api_key.clone(),
+                                    model: app.cfg.model.clone(),
+                                    tools_on: app.cfg.tools_enabled,
                                 });
                             }
                         }
                         dirty = true;
                     }
                     127 | 8 => {
-                        let first = app.buf.pop();
-                        if first.is_some_and(|b| b & 0xC0 == 0x80) {
-                            while app.buf.last().is_some_and(|b| b & 0xC0 == 0x80) {
-                                app.buf.pop();
-                            }
-                            if app.buf.last().is_some_and(|b| *b >= 0xC0) {
-                                app.buf.pop();
-                            }
-                        }
+                        pop_utf8(&mut app.buf);
                         dirty = true;
                     }
                     0x1b => {
                         app.focus = false;
+                        dirty = true;
+                    }
+                    22 => {
+                        paste_into(&mut app.buf, 4000, false);
                         dirty = true;
                     }
                     b if b >= 32 && app.buf.len() < 4000 => {
@@ -892,7 +1085,14 @@ fn main() {
             if list.is_empty() {
                 continue;
             }
-            if list[0].starts_with("error:") {
+            if let Some(p) = app.picker.as_mut() {
+                if list[0].starts_with("error:") {
+                    p.error = Some(list[0].clone());
+                } else {
+                    p.fetched = list;
+                    p.error = None;
+                }
+            } else if list[0].starts_with("error:") {
                 app.say(&list[0], VK::Err);
             } else {
                 app.meta(&format!("{} candidate models:", list.len()));
@@ -1161,6 +1361,56 @@ fn main() {
                 let s: String = txt.chars().take(cw).collect();
                 screen.text(x0i, 1 + base as i32 + r as i32, &s, *v);
             }
+            // model secici overlay (mesajlarin ustune)
+            if let Some(p) = app.picker.as_mut() {
+                let total = p.len();
+                if total > 0 && p.sel >= total {
+                    p.sel = total - 1;
+                }
+                let title: String = "Model — Enter select · Esc cancel · c custom"
+                    .chars()
+                    .take(cw.saturating_sub(1))
+                    .collect();
+                screen.text(x0i, 1, &title, 255);
+                if let Some(e) = p.error.clone() {
+                    let s: String = e.chars().take(cw.saturating_sub(1)).collect();
+                    screen.text(x0i, 2, &s, VK::Err.v());
+                    p.prompt_row = None;
+                } else {
+                    let room = hist_rows.saturating_sub(3).max(1);
+                    let vis = total.min(room);
+                    if p.sel < p.scroll {
+                        p.scroll = p.sel;
+                    }
+                    if vis > 0 && p.sel >= p.scroll + vis {
+                        p.scroll = p.sel + 1 - vis;
+                    }
+                    let max0 = total.saturating_sub(vis.max(1));
+                    if p.scroll > max0 {
+                        p.scroll = max0;
+                    }
+                    for r in 0..vis {
+                        let i = p.scroll + r;
+                        let label = match p.id_at(i) {
+                            Some(id) => id,
+                            None => CUSTOM_ENTRY.to_string(),
+                        };
+                        let sel = i == p.sel;
+                        let txt = format!("{} {}", if sel { ">" } else { " " }, label);
+                        let s: String = txt.chars().take(cw.saturating_sub(1)).collect();
+                        screen.text(x0i, 2 + r as i32, &s, if sel { 255 } else { 150 });
+                    }
+                    if p.custom_mode {
+                        let pr = 2 + vis as i32 + 1;
+                        let prompt = format!("id: {}", String::from_utf8_lossy(&p.custom_buf));
+                        let s: String = prompt.chars().take(cw.saturating_sub(1)).collect();
+                        screen.text(x0i, pr, &s, 255);
+                        p.prompt_row = Some(pr);
+                    } else {
+                        p.prompt_row = None;
+                    }
+                }
+            }
             // girdi kutusu
             let inner = cw.saturating_sub(2);
             let h3 = h as i32;
@@ -1217,7 +1467,17 @@ fn main() {
                 )
             };
             let cc = (x0 as i32 + 2 + line as i32).min(w as i32 - 2).max(0);
-            if app.capture || app.focus {
+            let custom_cur: Option<(i32, i32)> = match app.picker.as_ref() {
+                Some(p) if p.custom_mode => p.prompt_row.map(|pr| {
+                    let blen = String::from_utf8_lossy(&p.custom_buf).chars().count();
+                    let cx = (x0 as i32 + 5 + blen as i32).min(w as i32 - 2).max(0);
+                    (pr + 1, cx + 1)
+                }),
+                _ => None,
+            };
+            if let Some((rr, ccx)) = custom_cur {
+                buf.push_str(&format!("\x1b[{rr};{ccx}H\x1b[?25h"));
+            } else if app.capture || app.focus {
                 buf.push_str(&format!("\x1b[{};{}H\x1b[?25h", h - 1, cc + 1));
             } else {
                 buf.push_str("\x1b[?25l");

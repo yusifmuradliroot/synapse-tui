@@ -121,6 +121,61 @@ mod imp {
     pub fn read_key_bytes(out: &mut Vec<u8>) {
         out.push(read_byte());
     }
+
+    // Sistem panosu metni (Ctrl+V yapistirma icin). Yoksa None.
+    // Sirasiyla denenir; her biri kisa timeout'ludur.
+    pub fn clipboard_text() -> Option<String> {
+        use std::io::Read;
+        use std::process::Stdio;
+        use std::time::Duration;
+        let tries: &[(&str, &[&str])] = &[
+            ("wl-paste", &["--no-newline"]),
+            ("xclip", &["-o", "-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--output"]),
+        ];
+        for (prog, args) in tries {
+            let mut c = match std::process::Command::new(prog)
+                .args(*args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let start = std::time::Instant::now();
+            let mut done = false;
+            loop {
+                match c.try_wait() {
+                    Ok(Some(s)) => {
+                        done = s.success();
+                        break;
+                    }
+                    Ok(None) => {
+                        if start.elapsed() > Duration::from_millis(800) {
+                            let _ = c.kill();
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(_) => break,
+                }
+            }
+            let mut s = String::new();
+            if done {
+                if let Some(o) = c.stdout.as_mut() {
+                    let _ = o.read_to_string(&mut s);
+                }
+            } else {
+                let _ = c.kill();
+            }
+            if !s.trim().is_empty() {
+                return Some(s);
+            }
+        }
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -188,6 +243,8 @@ mod imp {
         fn GetCurrentConsoleFontEx(h: *mut c_void, m: i32, f: *mut FontInfo) -> i32;
         fn ReadConsoleW(h: *mut c_void, b: *mut u16, n: u32, r: *mut u32, x: *mut c_void) -> i32;
         fn WaitForSingleObject(h: *mut c_void, ms: u32) -> u32;
+        fn GlobalLock(h: *mut c_void) -> *mut u16;
+        fn GlobalUnlock(h: *mut c_void) -> i32;
     }
 
     #[link(name = "user32")]
@@ -195,6 +252,10 @@ mod imp {
         fn GetWindowRect(h: *mut c_void, r: *mut Rect) -> i32;
         fn GetClientRect(h: *mut c_void, r: *mut Rect) -> i32;
         fn MoveWindow(h: *mut c_void, x: i32, y: i32, w: i32, hgt: i32, r: i32) -> i32;
+        fn OpenClipboard(h: *mut c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(u: u32) -> *mut c_void;
+        fn IsClipboardFormatAvailable(u: u32) -> i32;
     }
 
     const WAIT_OBJECT_0: u32 = 0;
@@ -343,6 +404,41 @@ mod imp {
             }
         }
     }
+
+    // Sistem panosu metni (Ctrl+V). Baska uygulama kilitlemisse None.
+    pub fn clipboard_text() -> Option<String> {
+        unsafe {
+            const CF_UNICODETEXT: u32 = 13;
+            if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+                return None;
+            }
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                return None;
+            }
+            let h = GetClipboardData(CF_UNICODETEXT);
+            let mut out = None;
+            if !h.is_null() {
+                let p = GlobalLock(h);
+                if !p.is_null() {
+                    let mut len = 0usize;
+                    while *p.add(len) != 0 {
+                        len += 1;
+                    }
+                    let slice = std::slice::from_raw_parts(p, len);
+                    let s = String::from_utf16_lossy(slice);
+                    if !s.trim().is_empty() {
+                        out = Some(s);
+                    }
+                    GlobalUnlock(h);
+                }
+            }
+            CloseClipboard();
+            out
+        }
+    }
 }
 
-pub use imp::{poll_byte, raw_start, raw_stop, read_key_bytes, set_fullscreen, setup_window, size};
+pub use imp::{
+    clipboard_text, poll_byte, raw_start, raw_stop, read_key_bytes, set_fullscreen, setup_window,
+    size,
+};

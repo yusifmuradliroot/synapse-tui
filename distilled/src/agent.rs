@@ -42,8 +42,18 @@ pub enum WEvent {
 
 #[derive(Debug)]
 pub enum Cmd {
-    Ask { text: String, sess: Session },
-    Compact { sess: Session },
+    Ask {
+        text: String,
+        sess: Session,
+        key: String,
+        model: String,
+        tools_on: bool,
+    },
+    Compact {
+        sess: Session,
+        key: String,
+        model: String,
+    },
     Shutdown,
 }
 
@@ -98,13 +108,7 @@ fn tool_label(name: &str, args_json: &str) -> String {
     }
 }
 
-pub fn spawn(
-    cmd_rx: mpsc::Receiver<Cmd>,
-    key: String,
-    model: String,
-    ws: PathBuf,
-    tools_on: bool,
-) -> mpsc::Receiver<WEvent> {
+pub fn spawn(cmd_rx: mpsc::Receiver<Cmd>, ws: PathBuf) -> mpsc::Receiver<WEvent> {
     let (tx, rx) = mpsc::channel::<WEvent>();
     std::thread::spawn(move || loop {
         let Ok(cmd) = cmd_rx.recv() else {
@@ -112,7 +116,11 @@ pub fn spawn(
         };
         match cmd {
             Cmd::Shutdown => return,
-            Cmd::Compact { mut sess } => {
+            Cmd::Compact {
+                mut sess,
+                key,
+                model,
+            } => {
                 let _ = tx.send(WEvent::State(AState::Thinking));
                 let msgs = sess.messages.len();
                 match crate::session::compact(&key, &model, &mut sess) {
@@ -127,7 +135,13 @@ pub fn spawn(
                 let _ = tx.send(WEvent::State(AState::Waiting));
                 let _ = tx.send(WEvent::Done);
             }
-            Cmd::Ask { text, mut sess } => {
+            Cmd::Ask {
+                text,
+                mut sess,
+                key,
+                model,
+                tools_on,
+            } => {
                 if text.trim().is_empty() {
                     continue;
                 }

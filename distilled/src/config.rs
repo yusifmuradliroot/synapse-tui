@@ -21,6 +21,8 @@ pub struct Config {
     pub workspace: String,
     #[serde(default)]
     pub session: String,
+    #[serde(default)]
+    pub custom_models: Vec<String>,
 }
 
 fn d_ctx() -> u32 {
@@ -45,6 +47,7 @@ impl Default for Config {
             confirm_writes: true,
             workspace: d_cwd(),
             session: String::new(),
+            custom_models: Vec::new(),
         }
     }
 }
