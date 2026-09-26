@@ -42,6 +42,15 @@ enum Phase {
     Production,
 }
 
+// Gorunum: Split (yildiz sol + yazi sag), Star (yildiz ortada),
+// Chat (yazi tam ekran). m/c ile gecilir, gecis animasyonludur.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum View {
+    Split,
+    Star,
+    Chat,
+}
+
 // TUS: klavye bayti. FARE: SGR mouse (cb, 0-bazli sutun, 0-bazli satir, birakma).
 #[derive(Clone, Copy, Debug)]
 enum Event {
@@ -86,15 +95,6 @@ fn parse_sgr_mouse(first: u8) -> Option<(u32, i32, i32, bool)> {
 
 fn angle_rate(a: f64) -> f64 {
     1.5 * (0.5 + (1.0 - a.cos().abs()))
-}
-
-// Sohbet paneli geometrisi: (sol sutun, genislik). Dar pencerede yok.
-fn chat_geom(w: usize, h: usize, n: i32) -> Option<(usize, usize)> {
-    let div = n.max(0) as usize;
-    if h < 4 || div + 13 > w {
-        return None;
-    }
-    Some((div + 1, w - div - 1))
 }
 
 fn clip_y(cv: &mut Canvas, lo: f64, hi: f64) {
@@ -230,6 +230,11 @@ fn main() {
     let mut history: Vec<String> = Vec::new();
     let mut scroll: usize = 0;
     let mut chat_dirty = true;
+    let mut view = View::Split;
+    let mut star_bx = 0.0f64;
+    let mut star_by = 0.0f64;
+    let mut panel_w = 0.0f64;
+    let mut last_panel: Option<(usize, usize)> = None;
     let mut last = Instant::now();
     let t0 = last;
 
@@ -246,10 +251,10 @@ fn main() {
                         }
                         chat_dirty = true;
                     } else if !rel {
-                        let (w0, h0) = last_size;
+                        let h0 = last_size.1;
                         let on_input = h0 > 3
                             && row >= h0 as i32 - 3
-                            && chat_geom(w0, h0, cv.n).is_some_and(|(x0, _)| col >= x0 as i32);
+                            && last_panel.is_some_and(|(x0, _)| col >= x0 as i32);
                         if on_input != input_focus {
                             input_focus = on_input;
                             chat_dirty = true;
@@ -344,6 +349,22 @@ fn main() {
                     } else if b == b'\t' {
                         // Klavye yedegi: fare calismasa bile giris kutusuna odaklan.
                         input_focus = true;
+                        chat_dirty = true;
+                    } else if b == b'm' || b == b'M' {
+                        // Yildiz ortada, yazi ekrani animasyonla kapanir.
+                        view = if view == View::Star {
+                            View::Split
+                        } else {
+                            View::Star
+                        };
+                        chat_dirty = true;
+                    } else if b == b'c' || b == b'C' {
+                        // Yazi ekrani gelir, yildiz gider.
+                        view = if view == View::Chat {
+                            View::Split
+                        } else {
+                            View::Chat
+                        };
                         chat_dirty = true;
                     } else if b == b'q' || b == 0x1b || b == 3 {
                         term::raw_stop(&saved);
@@ -458,16 +479,6 @@ fn main() {
             }
         }
 
-        let animated = phase == Phase::Scan
-            || phase == Phase::ScanFill
-            || phase == Phase::Idle
-            || phase == Phase::Returning
-            || phase == Phase::Production;
-        if !animated && !resized && prev == phase && !chat_dirty {
-            std::thread::sleep(Duration::from_millis(30));
-            continue;
-        }
-
         let w = w.max(10);
         let h = h.max(5);
         // Hedef pencere 213x60'ta tam 120; daha kucuk konsolda sigacak kadar kuculur.
@@ -475,6 +486,40 @@ fn main() {
         if n != cv.n {
             cv = Canvas::new_exact(n);
             cv.aa = 2;
+        }
+        // Duzen animasyonu: yildiz konumu + panel genisligi hedefe yumusak gecer.
+        let rows_i = (cv.n + 1) / 2;
+        let (lay_tx, lay_ty, lay_tw) = match view {
+            View::Split => (0.0, 0.0, (w as i32 - cv.n - 1).max(0) as f64),
+            View::Star => (
+                (w as i32 - cv.n) as f64 / 2.0,
+                (h as i32 - rows_i) as f64 / 2.0,
+                0.0,
+            ),
+            View::Chat => (-(cv.n as f64), 0.0, w as f64),
+        };
+        let lay_k = 1.0 - (-dt / 0.25).exp();
+        star_bx += (lay_tx - star_bx) * lay_k;
+        star_by += (lay_ty - star_by) * lay_k;
+        panel_w += (lay_tw - panel_w) * lay_k;
+        let settled = (star_bx - lay_tx).abs() < 0.5
+            && (star_by - lay_ty).abs() < 0.5
+            && (panel_w - lay_tw).abs() < 0.5;
+        if settled {
+            star_bx = lay_tx;
+            star_by = lay_ty;
+            panel_w = lay_tw;
+        }
+        let transitioning = !settled;
+        let animated = phase == Phase::Scan
+            || phase == Phase::ScanFill
+            || phase == Phase::Idle
+            || phase == Phase::Returning
+            || phase == Phase::Production
+            || transitioning;
+        if !animated && !resized && prev == phase && !chat_dirty {
+            std::thread::sleep(Duration::from_millis(30));
+            continue;
         }
         let nf = n as f64;
         let sweep = -14.0 + (nf + 28.0) * scan_prog;
@@ -530,8 +575,10 @@ fn main() {
             }
         }
 
-        // Sol ust: hucre (0,0)'dan baslar, yari-blok (2 motor satiri = 1 hucre satiri).
+        // Yildiz animasyonlu konumdadir; ekran disi otomatik kirpilir.
         let rows = (cv.n + 1) / 2;
+        let bx = star_bx.round() as i32;
+        let by = star_by.round() as i32;
         screen.reset(w, h);
         for j in 0..rows {
             let y0 = 2 * j;
@@ -547,15 +594,24 @@ fn main() {
                 } else {
                     0
                 };
-                screen.half(i, j, t, b);
+                screen.half(bx + i, by + j, t, b);
             }
         }
         screen.text(0, 0, &vlabel, 255);
-        let chat = chat_geom(w, h, cv.n);
+        let pw = panel_w.round().clamp(0.0, w as f64) as usize;
+        let px0 = w.saturating_sub(pw);
+        let chat = if h >= 4 && pw >= 12 {
+            Some((px0, pw))
+        } else {
+            None
+        };
+        last_panel = chat;
         if let Some((x0, cw)) = chat {
             let x0i = x0 as i32;
-            for j in 0..h as i32 - 3 {
-                screen.text(x0i - 1, j, "│", 100);
+            if x0i > 0 {
+                for j in 0..h as i32 - 3 {
+                    screen.text(x0i - 1, j, "│", 100);
+                }
             }
             let hist_rows = h - 3;
             let maxscroll = history.len().saturating_sub(hist_rows);
