@@ -236,8 +236,8 @@ fn main() {
                         chat_dirty = true;
                     } else if !rel {
                         let (w0, h0) = last_size;
-                        let on_input = h0 > 0
-                            && row == h0 as i32 - 1
+                        let on_input = h0 > 3
+                            && row >= h0 as i32 - 3
                             && chat_geom(w0, h0, cv.n).is_some_and(|(x0, _)| col >= x0 as i32);
                         if on_input != input_focus {
                             input_focus = on_input;
@@ -529,10 +529,10 @@ fn main() {
         let chat = chat_geom(w, h, cv.n);
         if let Some((x0, cw)) = chat {
             let x0i = x0 as i32;
-            for j in 0..h as i32 {
+            for j in 0..h as i32 - 3 {
                 screen.text(x0i - 1, j, "│", 100);
             }
-            let hist_rows = h - 1;
+            let hist_rows = h - 3;
             let maxscroll = history.len().saturating_sub(hist_rows);
             if scroll > maxscroll {
                 scroll = maxscroll;
@@ -545,21 +545,35 @@ fn main() {
                 let s: String = msg.chars().take(cw).collect();
                 screen.text(x0i, base as i32 + r as i32, &s, 200);
             }
+            // Belirgin giris kutusu: 3 satir cerceve + ipucu/metin + imlec satiri.
+            let inner = cw.saturating_sub(2);
+            let h3 = h as i32;
+            screen.text(x0i, h3 - 3, &format!("┌{}┐", "─".repeat(inner)), 255);
+            screen.text(x0i, h3 - 1, &format!("└{}┘", "─".repeat(inner)), 255);
+            screen.text(x0i, h3 - 2, &format!("│{}│", " ".repeat(inner)), 255);
             let ib = String::from_utf8_lossy(&input_buf);
-            let kept = cw.saturating_sub(2).max(1);
+            let kept = inner.saturating_sub(2).max(1);
             let skip = ib.chars().count().saturating_sub(kept);
-            let shown: String = ib.chars().skip(skip).collect();
-            screen.text(x0i, h as i32 - 1, &format!("> {shown}"), 255);
+            let typed: String = ib.chars().skip(skip).collect();
+            let (content, cval) = if input_buf.is_empty() && !input_focus {
+                ("yazmak için tıkla".to_string(), 140u8)
+            } else if input_focus {
+                (format!("> {typed}"), 255u8)
+            } else {
+                (format!("> {typed}"), 200u8)
+            };
+            let crow: String = content.chars().take(inner).collect();
+            screen.text(x0i + 1, h3 - 2, &crow, cval);
         }
         let mut buf = screen.render();
         if input_focus {
             match chat {
                 Some((x0, cw)) => {
                     let ib = String::from_utf8_lossy(&input_buf);
-                    let kept = cw.saturating_sub(2).max(1);
+                    let kept = cw.saturating_sub(4).max(1);
                     let shown_len = ib.chars().count().min(kept);
-                    let cc = (x0 as i32 + 2 + shown_len as i32).min(w as i32 - 1).max(0);
-                    buf.push_str(&format!("\x1b[{};{}H\x1b[?25h", h, cc + 1));
+                    let cc = (x0 as i32 + 3 + shown_len as i32).min(w as i32 - 2).max(0);
+                    buf.push_str(&format!("\x1b[{};{}H\x1b[?25h", h - 1, cc + 1));
                 }
                 None => buf.push_str("\x1b[?25l"),
             }
