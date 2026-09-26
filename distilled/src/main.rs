@@ -139,6 +139,8 @@ enum Ev {
     Mouse(u32, i32, i32, bool),
     Up,
     Down,
+    Left,
+    Right,
 }
 
 fn parse_sgr_mouse(first: u8) -> Option<(u32, i32, i32, bool)> {
@@ -251,6 +253,7 @@ struct App {
     ask_pos: Option<(i32, i32)>,
     shell_mode: bool,
     shell_rx: Option<mpsc::Receiver<String>>,
+    settings: Option<Settings>,
 }
 impl App {
     fn say(&mut self, s: &str, k: VK) {
@@ -385,10 +388,38 @@ fn open_picker(app: &mut App, mtx: &mpsc::Sender<Vec<String>>) {
 }
 
 fn prov_of(c: &Config) -> api::Prov {
-    if c.provider == "nvidia" {
+    let mut p = if c.provider == "nvidia" {
         api::Prov::nvidia(&c.nvidia_key)
     } else {
         api::Prov::openrouter(&c.api_key)
+    };
+    p.temp = c.temperature;
+    p.top_p = c.top_p;
+    p.max_tokens = c.max_tokens;
+    p
+}
+
+fn set_provider(app: &mut App, to: &str) {
+    app.cfg.provider = to.to_string();
+    let m = if to == "nvidia" {
+        app.cfg.nv_model.clone()
+    } else {
+        app.cfg.or_model.clone()
+    };
+    app.cfg.model = m.clone();
+    app.sess.model = m;
+    let _ = config::save(&app.cfg);
+    app.meta(&format!("provider: {to} · model: {}", app.cfg.model));
+    if !config::has_key(&app.cfg) {
+        app.capture = true;
+        app.buf.clear();
+        app.cap_err = None;
+        app.status = format!(
+            "enter {} API key ({})",
+            app.cfg.provider,
+            config::key_hint(&app.cfg.provider)
+        );
+        app.meta("no key for this provider — paste it below");
     }
 }
 
@@ -465,6 +496,7 @@ fn picker_event(app: &mut App, ev: Ev) {
                 p.sel += 1;
             }
         }
+        Ev::Left | Ev::Right => {}
         Ev::Mouse(cb, col, row, rel) => {
             if cb & 64 != 0 {
                 if p.custom_mode {
@@ -545,7 +577,7 @@ fn ask_modal_event(app: &mut App, ev: Ev, ctx: &mpsc::Sender<Cmd>) {
         None => return,
     };
     match ev {
-        Ev::Up | Ev::Down | Ev::Mouse(..) => {}
+        Ev::Up | Ev::Down | Ev::Left | Ev::Right | Ev::Mouse(..) => {}
         Ev::Key(b) => match b {
             13 | 10 => {
                 let text = app
@@ -618,8 +650,246 @@ fn start_shell(app: &mut App, cmd: String) {
     });
 }
 
+// ── ayarlar ─────────────────────────────────────────────────────
+const SET_N: usize = 8;
+const MAX_TOKS: [u32; 9] = [0, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+const CTXS: [u32; 7] = [16000, 32000, 64000, 120000, 200000, 500000, 1000000];
+
+struct Settings {
+    sel: usize,
+    typing: bool,
+    type_buf: Vec<u8>,
+}
+
+fn set_label(i: usize) -> &'static str {
+    const L: [&str; 8] = [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "context_limit",
+        "provider",
+        "tools",
+        "confirm_writes",
+        "thinking",
+    ];
+    L[i.min(7)]
+}
+
+fn onoff(b: bool) -> String {
+    if b {
+        "on".into()
+    } else {
+        "off".into()
+    }
+}
+
+fn set_value(app: &App, i: usize) -> String {
+    match i {
+        0 => format!("{:.2}", app.cfg.temperature),
+        1 => format!("{:.2}", app.cfg.top_p),
+        2 => {
+            if app.cfg.max_tokens == 0 {
+                "auto".into()
+            } else {
+                app.cfg.max_tokens.to_string()
+            }
+        }
+        3 => app.cfg.context_limit.to_string(),
+        4 => app.cfg.provider.clone(),
+        5 => onoff(app.cfg.tools_enabled),
+        6 => onoff(app.cfg.confirm_writes),
+        _ => onoff(app.show_think),
+    }
+}
+
+fn cycle_u32(cur: u32, opts: &[u32], dir: i32) -> u32 {
+    let i = opts.iter().position(|&x| x == cur).unwrap_or(0);
+    opts[((i as i32 + dir).rem_euclid(opts.len() as i32)) as usize]
+}
+
+fn settings_cur(app: &App, x0: usize, w: usize) -> Option<(i32, i32)> {
+    let s = app.settings.as_ref()?;
+    if !s.typing {
+        return None;
+    }
+    let blen = String::from_utf8_lossy(&s.type_buf).chars().count();
+    let cc = (x0 as i32 + 4 + set_label(s.sel).len() as i32 + blen as i32)
+        .min(w as i32 - 2)
+        .max(0);
+    Some((2 + s.sel as i32 + 1, cc + 1))
+}
+
+fn set_adjust(app: &mut App, dir: i32) {
+    let sel = app.settings.as_ref().map(|s| s.sel).unwrap_or(0);
+    match sel {
+        0 => {
+            app.cfg.temperature = ((app.cfg.temperature + dir as f32 * 0.1) * 10.0).round() / 10.0;
+            app.cfg.temperature = app.cfg.temperature.clamp(0.0, 2.0);
+        }
+        1 => {
+            app.cfg.top_p = ((app.cfg.top_p + dir as f32 * 0.05) * 100.0).round() / 100.0;
+            app.cfg.top_p = app.cfg.top_p.clamp(0.0, 1.0);
+        }
+        2 => app.cfg.max_tokens = cycle_u32(app.cfg.max_tokens, &MAX_TOKS, dir),
+        3 => app.cfg.context_limit = cycle_u32(app.cfg.context_limit, &CTXS, dir),
+        4 => {
+            let to = if app.cfg.provider == "nvidia" {
+                "openrouter"
+            } else {
+                "nvidia"
+            };
+            set_provider(app, to);
+            return;
+        }
+        5 => app.cfg.tools_enabled = !app.cfg.tools_enabled,
+        6 => app.cfg.confirm_writes = !app.cfg.confirm_writes,
+        _ => {
+            app.show_think = !app.show_think;
+            app.cfg.show_thinking = app.show_think;
+        }
+    }
+    let _ = config::save(&app.cfg);
+}
+
+fn set_commit_type(app: &mut App) {
+    let (sel, buf) = match app.settings.as_ref() {
+        Some(s) => (
+            s.sel,
+            String::from_utf8_lossy(&s.type_buf)
+                .replace(',', ".")
+                .trim()
+                .to_string(),
+        ),
+        None => return,
+    };
+    if sel > 1 || buf.is_empty() {
+        return;
+    }
+    if let Ok(v) = buf.parse::<f32>() {
+        if sel == 0 {
+            app.cfg.temperature = v.clamp(0.0, 2.0);
+        } else {
+            app.cfg.top_p = v.clamp(0.0, 1.0);
+        }
+        let _ = config::save(&app.cfg);
+    }
+    if let Some(s) = app.settings.as_mut() {
+        s.typing = false;
+        s.type_buf.clear();
+    }
+}
+
+fn settings_event(app: &mut App, ev: Ev) {
+    let typing = app.settings.as_ref().is_some_and(|s| s.typing);
+    match ev {
+        Ev::Up => {
+            if !typing {
+                if let Some(s) = app.settings.as_mut() {
+                    s.sel = s.sel.saturating_sub(1);
+                }
+            }
+        }
+        Ev::Down => {
+            if !typing {
+                if let Some(s) = app.settings.as_mut() {
+                    if s.sel + 1 < SET_N {
+                        s.sel += 1;
+                    }
+                }
+            }
+        }
+        Ev::Left => {
+            if !typing {
+                set_adjust(app, -1);
+            }
+        }
+        Ev::Right => {
+            if !typing {
+                set_adjust(app, 1);
+            }
+        }
+        Ev::Mouse(cb, col, row, rel) => {
+            if typing {
+                return;
+            }
+            if cb & 64 != 0 {
+                if cb & 1 == 0 {
+                    if let Some(s) = app.settings.as_mut() {
+                        s.sel = s.sel.saturating_sub(3);
+                    }
+                } else if let Some(s) = app.settings.as_mut() {
+                    s.sel = (s.sel + 3).min(SET_N - 1);
+                }
+                return;
+            }
+            if rel {
+                return;
+            }
+            let (x0, _) = app.last_panel.unwrap_or((0, 0));
+            if col < x0 as i32 || row < 2 {
+                return;
+            }
+            let idx = (row - 2) as usize;
+            if idx < SET_N {
+                if let Some(s) = app.settings.as_mut() {
+                    s.sel = idx;
+                }
+            }
+        }
+        Ev::Key(b) => {
+            if typing {
+                match b {
+                    13 | 10 => set_commit_type(app),
+                    0x1b => {
+                        if let Some(s) = app.settings.as_mut() {
+                            s.typing = false;
+                            s.type_buf.clear();
+                        }
+                    }
+                    127 | 8 => {
+                        if let Some(s) = app.settings.as_mut() {
+                            pop_utf8(&mut s.type_buf);
+                        }
+                    }
+                    22 => {
+                        if let Some(s) = app.settings.as_mut() {
+                            paste_into(&mut s.type_buf, 12, true);
+                        }
+                    }
+                    _ if b >= 32 => {
+                        if let Some(s) = app.settings.as_mut() {
+                            if s.type_buf.len() < 12 {
+                                s.type_buf.push(b);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            match b {
+                0x1b => {
+                    app.settings = None;
+                }
+                13 | 10 => {
+                    let sel = app.settings.as_ref().map(|s| s.sel).unwrap_or(0);
+                    if sel < 2 {
+                        if let Some(s) = app.settings.as_mut() {
+                            s.typing = true;
+                            s.type_buf.clear();
+                        }
+                    }
+                }
+                b'-' | b'_' => set_adjust(app, -1),
+                b'=' | b'+' => set_adjust(app, 1),
+                _ => {}
+            }
+        }
+    }
+}
+
 fn help_text() -> &'static str {
-    "/help /model /provider openrouter|nvidia /run <cmd> /new /sessions /resume <id> /compact /context /clear \
+    "/help /model /settings /provider openrouter|nvidia /run <cmd> /init /new /sessions /resume <id> /compact /context /clear \
 /key /tools /thinking /m /c /quit\n\
 keys: TAB focus chat · ! shell mode · Ctrl+V paste · wheel scroll · q quit"
 }
@@ -732,10 +1002,20 @@ fn slash(
         }
         "thinking" => {
             app.show_think = !app.show_think;
+            app.cfg.show_thinking = app.show_think;
+            let _ = config::save(&app.cfg);
             app.meta(&format!(
                 "thinking stream {}",
                 if app.show_think { "shown" } else { "hidden" }
             ));
+        }
+        "settings" => {
+            app.focus = false;
+            app.settings = Some(Settings {
+                sel: 0,
+                typing: false,
+                type_buf: Vec::new(),
+            });
         }
         "run" => {
             if arg.is_empty() {
@@ -784,28 +1064,7 @@ fn slash(
                     app.cfg.provider
                 ));
             } else if arg == "openrouter" || arg == "nvidia" {
-                app.cfg.provider = arg.clone();
-                let m = if arg == "nvidia" {
-                    app.cfg.nv_model.clone()
-                } else {
-                    app.cfg.or_model.clone()
-                };
-                app.cfg.model = m.clone();
-                app.sess.model = m;
-                let _ = config::save(&app.cfg);
-                app.meta(&format!("provider: {arg} · model: {}", app.cfg.model));
-                if !config::has_key(&app.cfg) {
-                    // anahtar yoksa hemen iste
-                    app.capture = true;
-                    app.buf.clear();
-                    app.cap_err = None;
-                    app.status = format!(
-                        "enter {} API key ({})",
-                        app.cfg.provider,
-                        config::key_hint(&app.cfg.provider)
-                    );
-                    app.meta("no key for this provider — paste it below");
-                }
+                set_provider(app, &arg);
             } else {
                 app.meta("usage: /provider openrouter|nvidia");
             }
@@ -932,6 +1191,12 @@ fn main() {
                     Some(b'B') => {
                         let _ = etx.send(Ev::Down);
                     }
+                    Some(b'C') => {
+                        let _ = etx.send(Ev::Right);
+                    }
+                    Some(b'D') => {
+                        let _ = etx.send(Ev::Left);
+                    }
                     _ => {}
                 }
                 continue;
@@ -946,6 +1211,10 @@ fn main() {
                     let _ = etx.send(Ev::Up);
                 } else if f == b'B' {
                     let _ = etx.send(Ev::Down);
+                } else if f == b'C' {
+                    let _ = etx.send(Ev::Right);
+                } else if f == b'D' {
+                    let _ = etx.send(Ev::Left);
                 } else if let Some((cb, col, row, rel)) = parse_sgr_mouse(f) {
                     let _ = etx.send(Ev::Mouse(cb, col, row, rel));
                 }
@@ -991,7 +1260,9 @@ fn main() {
         ask_pos: None,
         shell_mode: false,
         shell_rx: None,
+        settings: None,
     };
+    app.show_think = app.cfg.show_thinking;
     if no_key {
         let prov = app.cfg.provider.clone();
         let (where_, hint) = if prov == "nvidia" {
@@ -1050,11 +1321,15 @@ fn main() {
                     ask_modal_event(&mut app, ev, &ctx);
                     dirty = true;
                 }
+                ev if app.settings.is_some() => {
+                    settings_event(&mut app, ev);
+                    dirty = true;
+                }
                 ev if app.picker.is_some() => {
                     picker_event(&mut app, ev);
                     dirty = true;
                 }
-                Ev::Up | Ev::Down => {}
+                Ev::Up | Ev::Down | Ev::Left | Ev::Right => {}
                 Ev::Mouse(cb, col, row, rel) => {
                     if cb & 64 != 0 {
                         if cb & 1 == 0 {
@@ -1687,6 +1962,39 @@ fn main() {
                 let ccx = (x0i + 2 + blen as i32).min(w as i32 - 2).max(0);
                 app.ask_pos = Some((start + rows.len() as i32 - 1 + 1, ccx + 1));
             }
+            // ayarlar overlay
+            if let Some(st) = app.settings.as_mut() {
+                if st.sel >= SET_N {
+                    st.sel = SET_N - 1;
+                }
+            }
+            if let Some(st) = app.settings.as_ref() {
+                let (sel, typing, tbuf) = (
+                    st.sel,
+                    st.typing,
+                    String::from_utf8_lossy(&st.type_buf).into_owned(),
+                );
+                let title: String =
+                    "Settings — Up/Down · Left/Right adjust · Enter type · Esc close"
+                        .chars()
+                        .take(cw.saturating_sub(1))
+                        .collect();
+                screen.text(x0i, 1, &title, 255);
+                for r in 0..SET_N {
+                    let is_sel = r == sel;
+                    let mut txt = format!(
+                        "{} {}: {}",
+                        if is_sel { ">" } else { " " },
+                        set_label(r),
+                        set_value(&app, r)
+                    );
+                    if typing && is_sel {
+                        txt = format!("> {}: {tbuf}", set_label(r));
+                    }
+                    let s: String = txt.chars().take(cw.saturating_sub(1)).collect();
+                    screen.text(x0i, 2 + r as i32, &s, if is_sel { 255 } else { 150 });
+                }
+            }
             // girdi kutusu
             let inner = cw.saturating_sub(2);
             let h3 = h as i32;
@@ -1762,6 +2070,8 @@ fn main() {
             if let Some((rr, ccx)) = custom_cur {
                 buf.push_str(&format!("\x1b[{rr};{ccx}H\x1b[?25h"));
             } else if let Some((rr, ccx)) = app.ask_pos {
+                buf.push_str(&format!("\x1b[{rr};{ccx}H\x1b[?25h"));
+            } else if let Some((rr, ccx)) = settings_cur(&app, x0, w) {
                 buf.push_str(&format!("\x1b[{rr};{ccx}H\x1b[?25h"));
             } else if app.capture || app.focus {
                 buf.push_str(&format!("\x1b[{};{}H\x1b[?25h", h - 1, cc + 1));

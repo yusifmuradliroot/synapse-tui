@@ -22,6 +22,14 @@ pub struct Config {
     pub or_model: String,
     #[serde(default = "d_ctx")]
     pub context_limit: u32,
+    #[serde(default = "d_temp")]
+    pub temperature: f32,
+    #[serde(default = "d_topp")]
+    pub top_p: f32,
+    #[serde(default)]
+    pub max_tokens: u32,
+    #[serde(default = "d_true")]
+    pub show_thinking: bool,
     #[serde(default = "d_true")]
     pub tools_enabled: bool,
     #[serde(default = "d_true")]
@@ -38,6 +46,12 @@ pub struct Config {
 
 fn d_ctx() -> u32 {
     120_000
+}
+fn d_temp() -> f32 {
+    1.0
+}
+fn d_topp() -> f32 {
+    1.0
 }
 fn d_true() -> bool {
     true
@@ -58,6 +72,10 @@ impl Default for Config {
             nv_model: DEFAULT_NV_MODEL.into(),
             or_model: DEFAULT_MODEL.into(),
             context_limit: d_ctx(),
+            temperature: d_temp(),
+            top_p: d_topp(),
+            max_tokens: 0,
+            show_thinking: true,
             tools_enabled: true,
             confirm_writes: true,
             workspace: d_cwd(),

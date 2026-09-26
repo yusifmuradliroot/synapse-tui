@@ -24,6 +24,9 @@ pub struct Prov {
     pub base: String,
     pub key: String,
     pub nvidia: bool,
+    pub temp: f32,
+    pub top_p: f32,
+    pub max_tokens: u32,
 }
 
 impl Prov {
@@ -32,6 +35,9 @@ impl Prov {
             base: base(),
             key: key.to_string(),
             nvidia: false,
+            temp: 1.0,
+            top_p: 1.0,
+            max_tokens: 0,
         }
     }
     pub fn nvidia(key: &str) -> Prov {
@@ -42,6 +48,9 @@ impl Prov {
             base: b,
             key: key.to_string(),
             nvidia: true,
+            temp: 1.0,
+            top_p: 1.0,
+            max_tokens: 0,
         }
     }
 }
@@ -188,9 +197,14 @@ pub fn chat_stream(
         "model": model,
         "messages": msgs,
         "stream": true,
+        "temperature": p.temp,
+        "top_p": p.top_p,
         "usage": { "include": true },
         "stream_options": { "include_usage": true },
     });
+    if p.max_tokens > 0 {
+        body["max_tokens"] = json!(p.max_tokens);
+    }
     if let Some(t) = tools {
         body["tools"] = t.clone();
     }
