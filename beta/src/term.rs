@@ -60,6 +60,42 @@ mod imp {
 
     pub fn setup_window() {}
 
+    #[repr(C)]
+    struct Timeval {
+        tv_sec: i64,
+        tv_usec: i64,
+    }
+
+    extern "C" {
+        fn select(n: i32, r: *mut u64, w: *mut u64, e: *mut u64, t: *mut Timeval) -> i32;
+    }
+
+    // ESC sonrasi CSI devam bayti var mi? Bloklamaz (100ms pencere).
+    pub fn poll_byte() -> Option<u8> {
+        unsafe {
+            let mut set = [0u64; 16];
+            set[0] |= 1;
+            let mut tv = Timeval {
+                tv_sec: 0,
+                tv_usec: 100_000,
+            };
+            if select(
+                1,
+                set.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            ) > 0
+            {
+                let mut b = 0u8;
+                if read(0, &mut b, 1) == 1 {
+                    return Some(b);
+                }
+            }
+            None
+        }
+    }
+
     pub fn size() -> (usize, usize) {
         unsafe {
             let mut ws = Winsize::default();
@@ -156,6 +192,22 @@ mod imp {
 
     extern "C" {
         fn _getch() -> i32;
+        fn _kbhit() -> i32;
+    }
+
+    // ESC sonrasi CSI devam bayti var mi? Bloklamaz.
+    pub fn poll_byte() -> Option<u8> {
+        unsafe {
+            if _kbhit() == 0 {
+                return None;
+            }
+            let c = _getch();
+            if c < 0 {
+                None
+            } else {
+                Some(c as u8)
+            }
+        }
     }
 
     pub struct Saved {
@@ -275,4 +327,4 @@ mod imp {
     }
 }
 
-pub use imp::{raw_start, raw_stop, read_byte, set_fullscreen, setup_window, size};
+pub use imp::{poll_byte, raw_start, raw_stop, read_byte, set_fullscreen, setup_window, size};

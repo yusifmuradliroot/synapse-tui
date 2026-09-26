@@ -42,8 +42,59 @@ enum Phase {
     Production,
 }
 
+// TUS: klavye bayti. FARE: SGR mouse (cb, 0-bazli sutun, 0-bazli satir, birakma).
+#[derive(Clone, Copy, Debug)]
+enum Event {
+    Key(u8),
+    Mouse(u32, i32, i32, bool),
+}
+
+// `\x1b[<Cb;Cx;CyM|m` SGR mouse dizisini coz. Basariliysa Some(cb,col0,row0,rel).
+fn parse_sgr_mouse(first: u8) -> Option<(u32, i32, i32, bool)> {
+    if first != b'<' {
+        return None;
+    }
+    let mut nums = [0u32; 3];
+    let mut ni = 0usize;
+    let mut cur = 0u32;
+    let mut digits = 0u32;
+    for _ in 0..16 {
+        let b = term::poll_byte()?;
+        if b.is_ascii_digit() {
+            cur = cur.saturating_mul(10).saturating_add((b - b'0') as u32);
+            digits += 1;
+        } else if b == b';' {
+            if ni >= 3 || digits == 0 {
+                return None;
+            }
+            nums[ni] = cur;
+            ni += 1;
+            cur = 0;
+            digits = 0;
+        } else if b == b'M' || b == b'm' {
+            if ni != 2 || digits == 0 {
+                return None;
+            }
+            nums[ni] = cur;
+            return Some((nums[0], nums[1] as i32 - 1, nums[2] as i32 - 1, b == b'm'));
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
 fn angle_rate(a: f64) -> f64 {
     1.5 * (0.5 + (1.0 - a.cos().abs()))
+}
+
+// Sohbet paneli geometrisi: (sol sutun, genislik). Dar pencerede yok.
+fn chat_geom(w: usize, h: usize, n: i32) -> Option<(usize, usize)> {
+    let div = n.max(0) as usize;
+    if h < 4 || div + 13 > w {
+        return None;
+    }
+    Some((div + 1, w - div - 1))
 }
 
 fn clip_y(cv: &mut Canvas, lo: f64, hi: f64) {
@@ -97,17 +148,50 @@ fn main() {
     let saved = term::raw_start();
     term::setup_window();
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[2J");
+    let _ = out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h");
     let _ = out.flush();
 
-    let (tx, rx) = mpsc::channel::<u8>();
+    let (tx, rx) = mpsc::channel::<Event>();
     std::thread::spawn(move || loop {
         let b = term::read_byte();
         if b == 0 {
             std::thread::sleep(Duration::from_millis(2));
             continue;
         }
-        if tx.send(b).is_err() {
+        if b != 0x1b {
+            if tx.send(Event::Key(b)).is_err() {
+                return;
+            }
+            continue;
+        }
+        // ESC: tek basina mi, CSI dizisi mi?
+        let nb = match term::poll_byte() {
+            Some(v) => v,
+            None => {
+                if tx.send(Event::Key(0x1b)).is_err() {
+                    return;
+                }
+                continue;
+            }
+        };
+        if nb != b'[' {
+            // ESC + baska bayt (Alt-kombo): ikisini de tus olarak ver.
+            if tx.send(Event::Key(0x1b)).is_err() {
+                return;
+            }
+            if tx.send(Event::Key(nb)).is_err() {
+                return;
+            }
+            continue;
+        }
+        // CSI: SGR mouse ise olaya cevir, degilse yok say.
+        if let Some(f) = term::poll_byte() {
+            if let Some((cb, col, row, rel)) = parse_sgr_mouse(f) {
+                if tx.send(Event::Mouse(cb, col, row, rel)).is_err() {
+                    return;
+                }
+            }
+        } else if tx.send(Event::Key(0x1b)).is_err() {
             return;
         }
     });
@@ -130,62 +214,119 @@ fn main() {
     let mut prod_stop: Option<(Phase, f64, f64)> = None;
     let mut stop_t = 0.0f64;
     let mut hold_auto = false;
+    let mut input_focus = false;
+    let mut input_buf: Vec<u8> = Vec::new();
+    let mut history: Vec<String> = Vec::new();
+    let mut scroll: usize = 0;
+    let mut chat_dirty = true;
     let mut last = Instant::now();
     let t0 = last;
 
     loop {
-        while let Ok(b) = rx.try_recv() {
-            if b == b'1' {
-                phase = Phase::Blank;
-                pt = 0.0;
-                scan_prog = 0.0;
-                coin_angle = 0.0;
-                spin_vel = 0.0;
-                spin_env = 0.0;
-                park_env = 0.0;
-                parked = false;
-                hold_auto = false;
-                prod_wheel = 0.0;
-                prod_wvel = 0.0;
-                prod_stop = None;
-            } else if b == b'2' && phase != Phase::Idle {
-                if phase == Phase::Production {
-                    let yaw_t = (coin_angle / PI).round() * PI;
-                    let wheel_t = (prod_wheel / (PI / 3.0)).round() * (PI / 3.0);
-                    prod_stop = Some((Phase::Idle, yaw_t, wheel_t));
-                    stop_t = 0.0;
-                } else {
-                    phase = Phase::Idle;
-                    pt = 0.0;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                Event::Mouse(cb, col, row, rel) => {
+                    if cb & 64 != 0 {
+                        // Tekerlek: yukari=eski mesajlar, asagi=yeni.
+                        if cb & 1 == 0 {
+                            scroll = scroll.saturating_add(3);
+                        } else {
+                            scroll = scroll.saturating_sub(3);
+                        }
+                        chat_dirty = true;
+                    } else if !rel {
+                        let (w0, h0) = last_size;
+                        let on_input = h0 > 0
+                            && row == h0 as i32 - 1
+                            && chat_geom(w0, h0, cv.n).is_some_and(|(x0, _)| col >= x0 as i32);
+                        if on_input != input_focus {
+                            input_focus = on_input;
+                            chat_dirty = true;
+                        }
+                    }
                 }
-            } else if b == b'3' {
-                phase = Phase::Production;
-                pt = 0.0;
-                prod_stop = None;
-                parked = true;
-            } else if b == b'0' {
-                if phase == Phase::Production {
-                    let yaw_t = (coin_angle / PI).round() * PI;
-                    let wheel_t = (prod_wheel / (PI / 3.0)).round() * (PI / 3.0);
-                    prod_stop = Some((Phase::Hold, yaw_t, wheel_t));
-                    stop_t = 0.0;
-                    parked = true;
-                } else if phase == Phase::Idle {
-                    phase = Phase::Returning;
-                    pt = 0.0;
-                    hold_auto = false;
-                    parked = true;
-                } else if phase != Phase::Hold {
-                    phase = Phase::Hold;
-                    pt = 0.0;
-                    hold_auto = false;
-                    parked = true;
+                Event::Key(b) if input_focus => match b {
+                    13 | 10 => {
+                        if !input_buf.is_empty() {
+                            history.push(String::from_utf8_lossy(&input_buf).into_owned());
+                            if history.len() > 500 {
+                                history.remove(0);
+                            }
+                            input_buf.clear();
+                            scroll = 0;
+                        }
+                        chat_dirty = true;
+                    }
+                    127 | 8 => {
+                        input_buf.pop();
+                        chat_dirty = true;
+                    }
+                    0x1b => {
+                        input_focus = false;
+                        chat_dirty = true;
+                    }
+                    _ if b >= 32 => {
+                        if input_buf.len() < 256 {
+                            input_buf.push(b);
+                        }
+                        chat_dirty = true;
+                    }
+                    _ => {}
+                },
+                Event::Key(b) => {
+                    if b == b'1' {
+                        phase = Phase::Blank;
+                        pt = 0.0;
+                        scan_prog = 0.0;
+                        coin_angle = 0.0;
+                        spin_vel = 0.0;
+                        spin_env = 0.0;
+                        park_env = 0.0;
+                        parked = false;
+                        hold_auto = false;
+                        prod_wheel = 0.0;
+                        prod_wvel = 0.0;
+                        prod_stop = None;
+                    } else if b == b'2' && phase != Phase::Idle {
+                        if phase == Phase::Production {
+                            let yaw_t = (coin_angle / PI).round() * PI;
+                            let wheel_t = (prod_wheel / (PI / 3.0)).round() * (PI / 3.0);
+                            prod_stop = Some((Phase::Idle, yaw_t, wheel_t));
+                            stop_t = 0.0;
+                        } else {
+                            phase = Phase::Idle;
+                            pt = 0.0;
+                        }
+                    } else if b == b'3' {
+                        phase = Phase::Production;
+                        pt = 0.0;
+                        prod_stop = None;
+                        parked = true;
+                    } else if b == b'0' {
+                        if phase == Phase::Production {
+                            let yaw_t = (coin_angle / PI).round() * PI;
+                            let wheel_t = (prod_wheel / (PI / 3.0)).round() * (PI / 3.0);
+                            prod_stop = Some((Phase::Hold, yaw_t, wheel_t));
+                            stop_t = 0.0;
+                            parked = true;
+                        } else if phase == Phase::Idle {
+                            phase = Phase::Returning;
+                            pt = 0.0;
+                            hold_auto = false;
+                            parked = true;
+                        } else if phase != Phase::Hold {
+                            phase = Phase::Hold;
+                            pt = 0.0;
+                            hold_auto = false;
+                            parked = true;
+                        }
+                    } else if b == b'q' || b == 0x1b || b == 3 {
+                        term::raw_stop(&saved);
+                        let _ = out.write_all(b"\x1b[?25h\x1b[0m\x1b[?1000l\x1b[?1006l\x1b[?1049l");
+                        let _ = out.flush();
+                        return;
+                    }
                 }
-            } else if b == b'q' || b == 0x1b || b == 3 {
-                term::raw_stop(&saved);
-                let _ = out.write_all(b"\x1b[?25h\x1b[0m\x1b[?1049l");
-                let _ = out.flush();
-                return;
             }
         }
         let now = Instant::now();
@@ -297,7 +438,7 @@ fn main() {
             || phase == Phase::Idle
             || phase == Phase::Returning
             || phase == Phase::Production;
-        if !animated && !resized && prev == phase {
+        if !animated && !resized && prev == phase && !chat_dirty {
             std::thread::sleep(Duration::from_millis(30));
             continue;
         }
@@ -385,9 +526,49 @@ fn main() {
             }
         }
         screen.text(0, 0, &vlabel, 255);
-        let buf = screen.render();
+        let chat = chat_geom(w, h, cv.n);
+        if let Some((x0, cw)) = chat {
+            let x0i = x0 as i32;
+            for j in 0..h as i32 {
+                screen.text(x0i - 1, j, "│", 100);
+            }
+            let hist_rows = h - 1;
+            let maxscroll = history.len().saturating_sub(hist_rows);
+            if scroll > maxscroll {
+                scroll = maxscroll;
+            }
+            let end = history.len().saturating_sub(scroll);
+            let start = end.saturating_sub(hist_rows);
+            let shown = &history[start..end];
+            let base = hist_rows - shown.len();
+            for (r, msg) in shown.iter().enumerate() {
+                let s: String = msg.chars().take(cw).collect();
+                screen.text(x0i, base as i32 + r as i32, &s, 200);
+            }
+            let ib = String::from_utf8_lossy(&input_buf);
+            let kept = cw.saturating_sub(2).max(1);
+            let skip = ib.chars().count().saturating_sub(kept);
+            let shown: String = ib.chars().skip(skip).collect();
+            screen.text(x0i, h as i32 - 1, &format!("> {shown}"), 255);
+        }
+        let mut buf = screen.render();
+        if input_focus {
+            match chat {
+                Some((x0, cw)) => {
+                    let ib = String::from_utf8_lossy(&input_buf);
+                    let kept = cw.saturating_sub(2).max(1);
+                    let shown_len = ib.chars().count().min(kept);
+                    let cc = (x0 as i32 + 2 + shown_len as i32).min(w as i32 - 1).max(0);
+                    buf.push_str(&format!("\x1b[{};{}H\x1b[?25h", h, cc + 1));
+                }
+                None => buf.push_str("\x1b[?25l"),
+            }
+        } else {
+            buf.push_str("\x1b[?25l");
+        }
         let _ = out.write_all(buf.as_bytes());
         let _ = out.flush();
+        chat_dirty = false;
 
         if animated {
             let spent = now.elapsed();

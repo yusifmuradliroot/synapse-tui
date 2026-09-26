@@ -1,8 +1,2 @@
-server.log
-tui/target/
-tui-prod/target/
-blue/target/
-aurion-tui.exe
-animation-production.exe
-blue.exe
-*.pgm
+target/
+*.pdb

@@ -51,8 +51,8 @@ impl Screen {
     }
 
     pub fn text(&mut self, x: i32, y: i32, s: &str, v: u8) {
-        for (i, b) in s.bytes().enumerate() {
-            if b == b' ' {
+        for (i, c) in s.chars().enumerate() {
+            if c == ' ' {
                 continue;
             }
             let xi = x + i as i32;
@@ -62,7 +62,7 @@ impl Screen {
             let idx = y as usize * self.w + xi as usize;
             self.top[idx] = v;
             self.bot[idx] = 0;
-            self.ch[idx] = b as char;
+            self.ch[idx] = c;
         }
     }
 
