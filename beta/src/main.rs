@@ -581,7 +581,7 @@ fn main() {
             let skip = ib.chars().count().saturating_sub(kept);
             let typed: String = ib.chars().skip(skip).collect();
             let (content, cval) = if input_buf.is_empty() && !input_focus {
-                ("yazmak için TAB / tıkla".to_string(), 140u8)
+                ("TAB / click to write".to_string(), 140u8)
             } else if input_focus {
                 (format!("> {typed}"), 255u8)
             } else {
