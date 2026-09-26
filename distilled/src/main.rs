@@ -247,6 +247,10 @@ struct App {
     last_w: usize,
     last_h: usize,
     picker: Option<Picker>,
+    ask_modal: Option<AskModal>,
+    ask_pos: Option<(i32, i32)>,
+    shell_mode: bool,
+    shell_rx: Option<mpsc::Receiver<String>>,
 }
 impl App {
     fn say(&mut self, s: &str, k: VK) {
@@ -356,7 +360,6 @@ impl Picker {
         }
     }
 }
-
 fn open_picker(app: &mut App, mtx: &mpsc::Sender<Vec<String>>) {
     app.focus = false;
     app.picker = Some(Picker {
@@ -369,10 +372,10 @@ fn open_picker(app: &mut App, mtx: &mpsc::Sender<Vec<String>>) {
         custom_buf: Vec::new(),
         prompt_row: None,
     });
-    let key = app.cfg.api_key.clone();
+    let prov = prov_of(&app.cfg);
     let tx = mtx.clone();
     std::thread::spawn(move || {
-        let out = match api::models(&key) {
+        let out = match api::models(&prov) {
             Ok(ms) => ms.into_iter().map(|(id, _)| id).take(120).collect(),
             Err(e) => vec![format!("error: {e}")],
         };
@@ -381,8 +384,33 @@ fn open_picker(app: &mut App, mtx: &mpsc::Sender<Vec<String>>) {
     app.meta("fetching model list… (Up/Down + Enter, c custom, Esc cancel)");
 }
 
+fn prov_of(c: &Config) -> api::Prov {
+    if c.provider == "nvidia" {
+        api::Prov::nvidia(&c.nvidia_key)
+    } else {
+        api::Prov::openrouter(&c.api_key)
+    }
+}
+
+fn set_model(c: &mut Config, id: &str) {
+    c.model = id.to_string();
+    if c.provider == "nvidia" {
+        c.nv_model = id.to_string();
+    } else {
+        c.or_model = id.to_string();
+    }
+}
+
+fn prov_tag(c: &Config) -> &'static str {
+    if c.provider == "nvidia" {
+        "nv"
+    } else {
+        "or"
+    }
+}
+
 fn apply_model(app: &mut App, id: &str) {
-    app.cfg.model = id.to_string();
+    set_model(&mut app.cfg, id);
     app.sess.model = id.to_string();
     let _ = config::save(&app.cfg);
     app.meta(&format!("model set: {id}"));
@@ -503,10 +531,97 @@ fn picker_event(app: &mut App, ev: Ev) {
     }
 }
 
+struct AskModal {
+    id: u32,
+    label: String,
+    question: String,
+    options: Vec<String>,
+    buf: Vec<u8>,
+}
+
+fn ask_modal_event(app: &mut App, ev: Ev, ctx: &mpsc::Sender<Cmd>) {
+    let id = match app.ask_modal.as_ref() {
+        Some(m) => m.id,
+        None => return,
+    };
+    match ev {
+        Ev::Up | Ev::Down | Ev::Mouse(..) => {}
+        Ev::Key(b) => match b {
+            13 | 10 => {
+                let text = app
+                    .ask_modal
+                    .as_ref()
+                    .map(|m| String::from_utf8_lossy(&m.buf).trim().to_string())
+                    .unwrap_or_default();
+                let _ = ctx.send(Cmd::AskReply { id, text });
+                app.ask_modal = None;
+            }
+            0x1b => {
+                let _ = ctx.send(Cmd::AskReply {
+                    id,
+                    text: String::new(),
+                });
+                app.ask_modal = None;
+            }
+            127 | 8 => {
+                if let Some(m) = app.ask_modal.as_mut() {
+                    pop_utf8(&mut m.buf);
+                }
+            }
+            22 => {
+                if let Some(m) = app.ask_modal.as_mut() {
+                    paste_into(&mut m.buf, 500, false);
+                }
+            }
+            _ if b >= 32 => {
+                if let Some(m) = app.ask_modal.as_mut() {
+                    if m.buf.len() < 500 {
+                        m.buf.push(b);
+                    }
+                }
+            }
+            _ => {}
+        },
+    }
+}
+
+fn ask_text(app: &mut App, ctx: &mpsc::Sender<Cmd>, text: String) {
+    app.say(&format!("❯ {text}"), VK::User);
+    app.state = AState::Thinking;
+    let _ = ctx.send(Cmd::Ask {
+        text,
+        sess: app.sess.clone(),
+        prov: prov_of(&app.cfg),
+        model: app.cfg.model.clone(),
+        cfg: app.cfg.clone(),
+    });
+}
+
+// Kullanici kabugu: komutu ayri thread'de calistir, cikti panele aksin.
+fn start_shell(app: &mut App, cmd: String) {
+    if app.shell_rx.is_some() {
+        app.meta("a shell command is already running");
+        return;
+    }
+    let line = cmd.trim().to_string();
+    if line.is_empty() {
+        return;
+    }
+    app.say(&format!("$ {line}"), VK::Tool);
+    app.state = AState::Working;
+    let ws = std::path::PathBuf::from(&app.cfg.workspace);
+    let (stx, srx) = mpsc::channel::<String>();
+    app.shell_rx = Some(srx);
+    std::thread::spawn(move || {
+        let out = crate::tools::shell(&line, &ws, None);
+        let _ = stx.send(out);
+    });
+}
+
 fn help_text() -> &'static str {
-    "/help /model /model <id> /new /sessions /resume <id> /compact /context /clear \
+    "/help /model /provider openrouter|nvidia /run <cmd> /new /sessions /resume <id> /compact /context /clear \
 /key /tools /thinking /m /c /quit\n\
-keys: TAB focus chat · Ctrl+V paste · wheel scroll · q quit"
+keys: TAB focus chat · ! shell mode · Ctrl+V paste · wheel scroll · q quit"
 }
 
 fn slash(
@@ -601,7 +716,11 @@ fn slash(
             app.capture = true;
             app.buf.clear();
             app.cap_err = None;
-            app.status = "enter new OpenRouter API key".into();
+            app.status = format!(
+                "enter new {} API key ({})",
+                app.cfg.provider,
+                config::key_hint(&app.cfg.provider)
+            );
         }
         "tools" => {
             app.cfg.tools_enabled = !app.cfg.tools_enabled;
@@ -617,6 +736,15 @@ fn slash(
                 "thinking stream {}",
                 if app.show_think { "shown" } else { "hidden" }
             ));
+        }
+        "run" => {
+            if arg.is_empty() {
+                app.shell_mode = true;
+                app.focus = true;
+                app.buf.clear();
+            } else {
+                start_shell(app, arg);
+            }
         }
         "m" => {
             app.view_mode = if app.view_mode == View::Star {
@@ -635,7 +763,7 @@ fn slash(
         "compact" => {
             let _ = tx.send(Cmd::Compact {
                 sess: app.sess.clone(),
-                key: app.cfg.api_key.clone(),
+                prov: prov_of(&app.cfg),
                 model: app.cfg.model.clone(),
             });
             app.meta("compacting context…");
@@ -644,10 +772,58 @@ fn slash(
             open_picker(app, mtx);
         }
         "model" => {
-            app.cfg.model = arg.clone();
+            set_model(&mut app.cfg, &arg);
             app.sess.model = arg.clone();
             let _ = config::save(&app.cfg);
             app.meta(&format!("model set: {arg}"));
+        }
+        "provider" => {
+            if arg.is_empty() {
+                app.meta(&format!(
+                    "provider: {} (openrouter | nvidia)",
+                    app.cfg.provider
+                ));
+            } else if arg == "openrouter" || arg == "nvidia" {
+                app.cfg.provider = arg.clone();
+                let m = if arg == "nvidia" {
+                    app.cfg.nv_model.clone()
+                } else {
+                    app.cfg.or_model.clone()
+                };
+                app.cfg.model = m.clone();
+                app.sess.model = m;
+                let _ = config::save(&app.cfg);
+                app.meta(&format!("provider: {arg} · model: {}", app.cfg.model));
+                if !config::has_key(&app.cfg) {
+                    // anahtar yoksa hemen iste
+                    app.capture = true;
+                    app.buf.clear();
+                    app.cap_err = None;
+                    app.status = format!(
+                        "enter {} API key ({})",
+                        app.cfg.provider,
+                        config::key_hint(&app.cfg.provider)
+                    );
+                    app.meta("no key for this provider — paste it below");
+                }
+            } else {
+                app.meta("usage: /provider openrouter|nvidia");
+            }
+        }
+        "init" => {
+            app.say("❯ /init", VK::User);
+            app.state = AState::Thinking;
+            let _ = tx.send(Cmd::Ask {
+                text: "Survey this workspace and report: 1) project tree (top 2 levels), \
+2) languages and build systems detected, 3) entry points, READMEs and configs, \
+4) how to build, test and run it. Use list_dir, glob and read_file. Keep it factual. \
+Do not write any files. End with a 5-line project summary."
+                    .to_string(),
+                sess: app.sess.clone(),
+                prov: prov_of(&app.cfg),
+                model: app.cfg.model.clone(),
+                cfg: app.cfg.clone(),
+            });
         }
         _ => {
             if cmd.is_empty() {
@@ -811,10 +987,28 @@ fn main() {
         last_w: 0,
         last_h: 0,
         picker: None,
+        ask_modal: None,
+        ask_pos: None,
+        shell_mode: false,
+        shell_rx: None,
     };
     if no_key {
+        let prov = app.cfg.provider.clone();
+        let (where_, hint) = if prov == "nvidia" {
+            (
+                "an NVIDIA NIM API key below",
+                "Get one at https://build.nvidia.com",
+            )
+        } else {
+            (
+                "your OpenRouter API key below",
+                "Get one at https://openrouter.ai/keys",
+            )
+        };
         app.say(
-            "Welcome to synapse-distilled.\nPaste your OpenRouter API key below (it is stored in the user config). Get one at https://openrouter.ai/keys",
+            &format!(
+                "Welcome to synapse-distilled.\nPaste {where_} (stored in the user config). {hint}"
+            ),
             VK::Hint,
         );
     } else {
@@ -852,6 +1046,10 @@ fn main() {
         let mut dirty = false;
         while let Ok(ev) = erx.try_recv() {
             match ev {
+                ev if app.ask_modal.is_some() => {
+                    ask_modal_event(&mut app, ev, &ctx);
+                    dirty = true;
+                }
                 ev if app.picker.is_some() => {
                     picker_event(&mut app, ev);
                     dirty = true;
@@ -879,8 +1077,17 @@ fn main() {
                 Ev::Key(b) if app.capture => match b {
                     13 | 10 => {
                         let k = String::from_utf8_lossy(&app.buf).trim().to_string();
-                        if k.starts_with("sk-or-") || k.len() > 20 {
-                            app.cfg.api_key = k;
+                        let want = if app.cfg.provider == "nvidia" {
+                            "nvapi-"
+                        } else {
+                            "sk-or-"
+                        };
+                        if k.starts_with(want) || k.len() > 20 {
+                            if app.cfg.provider == "nvidia" {
+                                app.cfg.nvidia_key = k;
+                            } else {
+                                app.cfg.api_key = k;
+                            }
                             let _ = config::save(&app.cfg);
                             app.capture = false;
                             app.buf.clear();
@@ -891,10 +1098,11 @@ fn main() {
                                     VK::Meta,
                                 );
                         } else {
-                            app.cap_err = Some(
-                                "that does not look like an OpenRouter key (expected sk-or-…)"
-                                    .into(),
-                            );
+                            app.cap_err = Some(format!(
+                                "that does not look like a {} key (expected {})",
+                                app.cfg.provider,
+                                config::key_hint(&app.cfg.provider)
+                            ));
                             app.buf.clear();
                         }
                         dirty = true;
@@ -923,16 +1131,10 @@ fn main() {
                                 if slash(&mut app, &line, &ctx, &mtx) {
                                     quit = true;
                                 }
+                            } else if app.shell_mode {
+                                start_shell(&mut app, line);
                             } else {
-                                app.say(&format!("❯ {line}"), VK::User);
-                                app.state = AState::Thinking;
-                                let _ = ctx.send(Cmd::Ask {
-                                    text: line,
-                                    sess: app.sess.clone(),
-                                    key: app.cfg.api_key.clone(),
-                                    model: app.cfg.model.clone(),
-                                    tools_on: app.cfg.tools_enabled,
-                                });
+                                ask_text(&mut app, &ctx, line);
                             }
                         }
                         dirty = true;
@@ -956,8 +1158,21 @@ fn main() {
                     _ => {}
                 },
                 Ev::Key(b) => {
-                    if b == b'q' || b == 0x1b || b == 3 {
+                    if b == b'q' || b == 3 {
                         quit = true;
+                    } else if b == 0x1b {
+                        if app.shell_mode {
+                            app.shell_mode = false;
+                            dirty = true;
+                        } else {
+                            quit = true;
+                        }
+                    } else if b == b'!' {
+                        // shell modu: terminalden direkt komut calistir
+                        app.shell_mode = !app.shell_mode;
+                        app.focus = true;
+                        app.buf.clear();
+                        dirty = true;
                     } else if b == b'\t' {
                         app.focus = true;
                         dirty = true;
@@ -1053,6 +1268,27 @@ fn main() {
                 WEvent::Compacted(n) => {
                     app.meta(&format!("context compacted: {n} messages summarized"));
                 }
+                WEvent::AskUser {
+                    id,
+                    label,
+                    question,
+                    options,
+                } => {
+                    app.ask_modal = Some(AskModal {
+                        id,
+                        label,
+                        question,
+                        options,
+                        buf: Vec::new(),
+                    });
+                    dirty = true;
+                }
+                WEvent::PermSet { tool, value } => {
+                    app.cfg.permissions.insert(tool.clone(), value.clone());
+                    let _ = config::save(&app.cfg);
+                    app.meta(&format!("permission: {tool} = {value}"));
+                    dirty = true;
+                }
                 WEvent::Sess(s) => {
                     app.sess = *s;
                     app.sess.updated = session::now();
@@ -1066,6 +1302,23 @@ fn main() {
                     app.scroll = 0;
                     dirty = true;
                 }
+            }
+        }
+        // shell komutu sonucu
+        if let Some(rx) = app.shell_rx.as_ref() {
+            if let Ok(out) = rx.try_recv() {
+                for l in wrap(out.trim_end(), 90) {
+                    app.view.push(VLine {
+                        text: l,
+                        kind: VK::Tool,
+                    });
+                }
+                app.shell_rx = None;
+                if app.state == AState::Working {
+                    app.state = AState::Waiting;
+                }
+                app.scroll = 0;
+                dirty = true;
             }
         }
         if !app
@@ -1316,9 +1569,10 @@ fn main() {
                 AState::Working => "working",
             };
             let head: String = format!(
-                "{} v{} │ {} │ ctx {}% │ {} │ {}",
+                "{} v{} │ {}:{} │ ctx {}% │ {} │ {}",
                 NAME,
                 VER,
+                prov_tag(&app.cfg),
                 model_short(&app.cfg.model),
                 pct,
                 st,
@@ -1411,6 +1665,28 @@ fn main() {
                     }
                 }
             }
+            // izin/soru modali (en ustte)
+            app.ask_pos = None;
+            if let Some(m) = app.ask_modal.as_ref() {
+                let mut rows: Vec<(String, u8)> =
+                    vec![(format!("? {} — Enter send · Esc empty", m.label), 255)];
+                for l in wrap(&m.question, cw.saturating_sub(4)) {
+                    rows.push((l, 200));
+                }
+                for (i, o) in m.options.iter().enumerate() {
+                    rows.push((format!("  {}. {}", i + 1, o), 150));
+                }
+                let prompt = format!("> {}", String::from_utf8_lossy(&m.buf));
+                rows.push((prompt, 255));
+                let start = (h as i32 - 4 - rows.len() as i32).max(1);
+                for (r, (txt, v)) in rows.iter().enumerate() {
+                    let s: String = txt.chars().take(cw).collect();
+                    screen.text(x0i, start + r as i32, &s, *v);
+                }
+                let blen = m.buf.len().min(cw.saturating_sub(4));
+                let ccx = (x0i + 2 + blen as i32).min(w as i32 - 2).max(0);
+                app.ask_pos = Some((start + rows.len() as i32 - 1 + 1, ccx + 1));
+            }
             // girdi kutusu
             let inner = cw.saturating_sub(2);
             let h3 = h as i32;
@@ -1431,8 +1707,16 @@ fn main() {
                         255
                     },
                 )
+            } else if app.shell_mode {
+                (
+                    format!("$ {}", String::from_utf8_lossy(&app.buf)),
+                    if app.focus { 255 } else { 200 },
+                )
             } else if app.buf.is_empty() && !app.focus {
-                ("TAB or click to write · /help".to_string(), VK::Hint.v())
+                (
+                    "TAB or click to write · /help · ! shell".to_string(),
+                    VK::Hint.v(),
+                )
             } else {
                 (
                     format!("> {}", String::from_utf8_lossy(&app.buf)),
@@ -1476,6 +1760,8 @@ fn main() {
                 _ => None,
             };
             if let Some((rr, ccx)) = custom_cur {
+                buf.push_str(&format!("\x1b[{rr};{ccx}H\x1b[?25h"));
+            } else if let Some((rr, ccx)) = app.ask_pos {
                 buf.push_str(&format!("\x1b[{rr};{ccx}H\x1b[?25h"));
             } else if app.capture || app.focus {
                 buf.push_str(&format!("\x1b[{};{}H\x1b[?25h", h - 1, cc + 1));

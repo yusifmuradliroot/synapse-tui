@@ -8,12 +8,42 @@ use serde_json::{json, Value};
 use std::io::BufRead;
 use std::time::Duration;
 
-pub const BASE: &str = "https://openrouter.ai/api/v1";
+pub const OR_BASE: &str = "https://openrouter.ai/api/v1";
+pub const NV_BASE: &str = "https://integrate.api.nvidia.com/v1";
 pub const REFERER: &str = "https://github.com/aurion";
 
 // Test/yerel sunucu icin taban adresi degistirilebilir.
 fn base() -> String {
-    std::env::var("SYNAPSE_API_BASE").unwrap_or_else(|_| BASE.to_string())
+    std::env::var("SYNAPSE_API_BASE").unwrap_or_else(|_| OR_BASE.to_string())
+}
+
+// Saglayici baglami. NVIDIA NIM OpenAI-uyumludur ama dusunme alani
+// `reasoning_content` adiyla gelir ve history'e geri gonderilmemelidir.
+#[derive(Clone, Debug)]
+pub struct Prov {
+    pub base: String,
+    pub key: String,
+    pub nvidia: bool,
+}
+
+impl Prov {
+    pub fn openrouter(key: &str) -> Prov {
+        Prov {
+            base: base(),
+            key: key.to_string(),
+            nvidia: false,
+        }
+    }
+    pub fn nvidia(key: &str) -> Prov {
+        let b = std::env::var("SYNAPSE_NV_BASE").unwrap_or_else(|_| NV_BASE.to_string());
+        // Test kancasi ayni tabani ezebilir
+        let b = std::env::var("SYNAPSE_API_BASE").unwrap_or(b);
+        Prov {
+            base: b,
+            key: key.to_string(),
+            nvidia: true,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
@@ -105,10 +135,10 @@ fn auth(key: &str) -> String {
     format!("Bearer {}", key.trim())
 }
 
-pub fn models(key: &str) -> Result<Vec<(String, String)>, String> {
+pub fn models(p: &Prov) -> Result<Vec<(String, String)>, String> {
     let r = agent()
-        .get(&format!("{}/models", base()))
-        .header("Authorization", &auth(key))
+        .get(&format!("{}/models", p.base))
+        .header("Authorization", &auth(&p.key))
         .call()
         .map_err(|e| e.to_string())?;
     let v: Value = r.into_body().read_json().map_err(|e| e.to_string())?;
@@ -141,32 +171,60 @@ struct Acc {
 }
 
 pub fn chat_stream(
-    key: &str,
+    p: &Prov,
     model: &str,
     messages: &[Message],
     tools: Option<&Value>,
     mut on_ev: impl FnMut(Ev),
 ) {
+    // NVIDIA reasoning blogunu geri gondermez (400 verir).
+    let mut msgs: Vec<Message> = messages.to_vec();
+    if p.nvidia {
+        for m in msgs.iter_mut() {
+            m.reasoning = None;
+        }
+    }
     let mut body = json!({
         "model": model,
-        "messages": messages,
+        "messages": msgs,
         "stream": true,
         "usage": { "include": true },
+        "stream_options": { "include_usage": true },
     });
     if let Some(t) = tools {
         body["tools"] = t.clone();
     }
-    let resp = agent()
-        .post(&format!("{}/chat/completions", base()))
-        .header("Authorization", &auth(key))
-        .header("Content-Type", "application/json")
-        .header("HTTP-Referer", REFERER)
-        .header("X-Title", "synapse-distilled")
-        .send_json(&body);
+    let mut attempt = 0;
+    let resp = loop {
+        attempt += 1;
+        match agent()
+            .post(&format!("{}/chat/completions", p.base))
+            .header("Authorization", &auth(&p.key))
+            .header("Content-Type", "application/json")
+            .header("HTTP-Referer", REFERER)
+            .header("X-Title", "synapse-distilled")
+            .send_json(&body)
+        {
+            Ok(r) => break Ok(r),
+            Err(e) => {
+                let s = e.to_string();
+                // auth hatasinda tekrar deneme; tasima hatasinda 1 kez dene
+                if attempt < 2
+                    && !s.contains("401")
+                    && !s.contains("403")
+                    && !s.contains("Unauthorized")
+                {
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                break Err(s);
+            }
+        }
+    };
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => {
-            on_ev(Ev::Failed(e.to_string()));
+        Err(s) => {
+            on_ev(Ev::Failed(s));
             return;
         }
     };
@@ -214,6 +272,12 @@ pub fn chat_stream(
             continue;
         };
         if let Some(r) = delta.get("reasoning").and_then(|x| x.as_str()) {
+            if !r.is_empty() {
+                on_ev(Ev::Reasoning(r.to_string()));
+            }
+        }
+        // NVIDIA NIM: dusunme `reasoning_content` alaninda gelir.
+        if let Some(r) = delta.get("reasoning_content").and_then(|x| x.as_str()) {
             if !r.is_empty() {
                 on_ev(Ev::Reasoning(r.to_string()));
             }
@@ -269,4 +333,25 @@ pub fn chat_stream(
         prompt: ptok,
         completion: ctok,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nim_strips_reasoning() {
+        let msgs = vec![Message {
+            role: "assistant".into(),
+            content: "x".into(),
+            reasoning: Some("think".into()),
+            ..Default::default()
+        }];
+        let mut out = msgs.clone();
+        for m in out.iter_mut() {
+            m.reasoning = None;
+        }
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(!s.contains("reasoning"), "{s}");
+    }
 }

@@ -138,7 +138,7 @@ This summary is the only memory that survives compaction.";
 
 /// /compact: gecmisi ozetleyip korunacak son mesajlari birakiyor.
 /// Ozet metni dondurur (cagiran yazar).
-pub fn compact(key: &str, model: &str, s: &mut Session) -> Result<String, String> {
+pub fn compact(p: &api::Prov, model: &str, s: &mut Session) -> Result<String, String> {
     if s.messages.len() <= KEEP_AFTER_COMPACT {
         return Err("history is too short to compact".into());
     }
@@ -159,7 +159,7 @@ pub fn compact(key: &str, model: &str, s: &mut Session) -> Result<String, String
     }
     let msgs = vec![Message::sys(COMPACT_PROMPT), Message::user(&convo)];
     let mut out = String::new();
-    api::chat_stream(key, model, &msgs, None, |ev| match ev {
+    api::chat_stream(p, model, &msgs, None, |ev| match ev {
         api::Ev::Text(t) => out.push_str(&t),
         api::Ev::Failed(e) => out = format!("__ERR__{e}"),
         _ => {}
