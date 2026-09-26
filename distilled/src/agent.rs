@@ -41,6 +41,7 @@ pub enum WEvent {
         label: String,
         question: String,
         options: Vec<String>,
+        buttons: bool,
     },
     PermSet {
         tool: String,
@@ -216,7 +217,16 @@ fn exec_tool(
                 .unwrap_or_default();
             rt.ask_id += 1;
             let id = rt.ask_id;
-            return match ask_round(tx, cmd_rx, &mut rt.pending, id, "agent question", &q, opts) {
+            return match ask_round(
+                tx,
+                cmd_rx,
+                &mut rt.pending,
+                id,
+                "agent question",
+                &q,
+                opts,
+                false,
+            ) {
                 Some(t) if !t.trim().is_empty() => format!("user answer: {}", t.trim()),
                 _ => "user gave no answer".into(),
             };
@@ -225,6 +235,20 @@ fn exec_tool(
     }
     // izin denetimi
     let perm = crate::config::perm(cfg, name);
+    if std::env::var("SYNAPSE_DBG").is_ok() {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/perm_dbg.log")
+        {
+            let _ = writeln!(
+                f,
+                "TOOL {name} perm={perm} has_map={}",
+                cfg.permissions.contains_key(name)
+            );
+        }
+    }
     if perm == "deny" {
         return format!("denied by permissions ({name} is disabled)");
     }
@@ -260,6 +284,7 @@ fn exec_tool(
             "permission",
             &q,
             vec!["allow once".into(), "always allow".into(), "deny".into()],
+            true,
         );
         let a = ans.unwrap_or_default().trim().to_lowercase();
         if a.starts_with("always") {
@@ -401,6 +426,7 @@ fn ask_round(
     label: &str,
     question: &str,
     options: Vec<String>,
+    buttons: bool,
 ) -> Option<String> {
     let _ = tx.send(WEvent::State(AState::Waiting));
     let _ = tx.send(WEvent::AskUser {
@@ -408,6 +434,7 @@ fn ask_round(
         label: label.to_string(),
         question: question.to_string(),
         options,
+        buttons,
     });
     loop {
         match cmd_rx.recv() {

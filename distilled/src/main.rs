@@ -177,11 +177,73 @@ fn parse_sgr_mouse(first: u8) -> Option<(u32, i32, i32, bool)> {
     None
 }
 
+// Ekrana basilacak metni guvenli hale getir: ANSI kacis dizileri, \r,
+// TAB ve kontrol karakterleri imleci ziplatip satirlari ust uste bindirir.
+fn clean(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut ch = s.chars().peekable();
+    while let Some(c) = ch.next() {
+        if c == '\x1b' {
+            match ch.peek() {
+                Some('[') => {
+                    ch.next();
+                    for c2 in ch.by_ref() {
+                        if c2.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    ch.next();
+                    loop {
+                        match ch.next() {
+                            None => break,
+                            Some('\x07') => break,
+                            Some('\x1b') => {
+                                if ch.peek() == Some(&'\\') {
+                                    ch.next();
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some('(') | Some(')') | Some('#') => {
+                    ch.next();
+                    ch.next();
+                }
+                Some(_) => {
+                    ch.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+        if c == '\r' {
+            continue;
+        }
+        if c == '\n' {
+            out.push('\n');
+            continue;
+        }
+        if c == '\t' {
+            out.push_str("  ");
+            continue;
+        }
+        if c == '\u{7f}' || (c.is_control() && c != '\n') {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 // Metni sarmala (UTF-8 guvenli, kelime tabanli).
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut out = Vec::new();
-    for raw in text.split('\n') {
+    for raw in clean(text).split('\n') {
         if raw.is_empty() {
             out.push(String::new());
             continue;
@@ -569,9 +631,161 @@ struct AskModal {
     question: String,
     options: Vec<String>,
     buf: Vec<u8>,
+    buttons: bool,
+    sel: usize,
+    btn_rows: Vec<(i32, Vec<(i32, i32, usize)>)>,
+}
+
+fn modal_submit(app: &mut App, ctx: &mpsc::Sender<Cmd>, text: String) {
+    if let Some(m) = app.ask_modal.take() {
+        let _ = ctx.send(Cmd::AskReply { id: m.id, text });
+    }
+}
+
+// Modal duzeni (kirpma + cizim ayni hesabi kullanir).
+struct ModalLayout {
+    start: i32,
+    head: Vec<(String, u8)>,
+    blines: Vec<String>,
+    bspans: Vec<Vec<(usize, usize, usize)>>,
+}
+
+fn modal_layout(m: &AskModal, cw: usize, h: usize) -> ModalLayout {
+    let mut head: Vec<(String, u8)> =
+        vec![(format!("? {} — Enter send · Esc empty", m.label), 255)];
+    for l in wrap(&m.question, cw.saturating_sub(4)) {
+        head.push((l, 200));
+    }
+    if !m.buttons {
+        for (i, o) in m.options.iter().enumerate() {
+            head.push((format!("  {}. {}", i + 1, clean(o)), 150));
+        }
+        head.push((
+            clean(&format!("> {}", String::from_utf8_lossy(&m.buf))),
+            255,
+        ));
+    }
+    let (blines, bspans) = if m.buttons {
+        let mut blines: Vec<String> = Vec::new();
+        let mut bspans: Vec<Vec<(usize, usize, usize)>> = Vec::new();
+        let mut cur = String::new();
+        let mut csp: Vec<(usize, usize, usize)> = Vec::new();
+        for (i, o) in m.options.iter().enumerate() {
+            let o = clean(o);
+            let t = if i == m.sel {
+                format!("[{o}]")
+            } else {
+                format!(" {o} ")
+            };
+            let need = t.chars().count() + if cur.is_empty() { 0 } else { 2 };
+            if !cur.is_empty() && cur.chars().count() + need > cw.saturating_sub(1) {
+                blines.push(std::mem::take(&mut cur));
+                bspans.push(std::mem::take(&mut csp));
+            }
+            let x0 = cur.chars().count() + if cur.is_empty() { 0 } else { 2 };
+            if !cur.is_empty() {
+                cur.push_str("  ");
+            }
+            cur.push_str(&t);
+            csp.push((x0, cur.chars().count(), i));
+        }
+        blines.push(cur);
+        bspans.push(csp);
+        (blines, bspans)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let start = (h as i32 - 4 - head.len() as i32 - blines.len() as i32).max(1);
+    ModalLayout {
+        start,
+        head,
+        blines,
+        bspans,
+    }
 }
 
 fn ask_modal_event(app: &mut App, ev: Ev, ctx: &mpsc::Sender<Cmd>) {
+    let buttons = app.ask_modal.as_ref().is_some_and(|m| m.buttons);
+    if buttons {
+        let n = app.ask_modal.as_ref().map(|m| m.options.len()).unwrap_or(0);
+        match ev {
+            Ev::Up | Ev::Left => {
+                if let Some(m) = app.ask_modal.as_mut() {
+                    if n > 0 {
+                        m.sel = (m.sel + n - 1) % n;
+                    }
+                }
+            }
+            Ev::Down | Ev::Right => {
+                if let Some(m) = app.ask_modal.as_mut() {
+                    if n > 0 {
+                        m.sel = (m.sel + 1) % n;
+                    }
+                }
+            }
+            Ev::Mouse(cb, col, row, rel) => {
+                if cb & 64 != 0 {
+                    if let Some(m) = app.ask_modal.as_mut() {
+                        if n > 0 {
+                            if cb & 1 == 0 {
+                                m.sel = (m.sel + n - 1) % n;
+                            } else {
+                                m.sel = (m.sel + 1) % n;
+                            }
+                        }
+                    }
+                    return;
+                }
+                if rel {
+                    return;
+                }
+                // butona tikla = sec + onayla
+                let hit = app.ask_modal.as_ref().and_then(|m| {
+                    m.btn_rows.iter().find_map(|(r, spans)| {
+                        if *r == row {
+                            spans
+                                .iter()
+                                .find(|(x0, x1, _)| col >= *x0 && col < *x1)
+                                .map(|(_, _, i)| *i)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                if let Some(i) = hit {
+                    let text = app
+                        .ask_modal
+                        .as_ref()
+                        .and_then(|m| m.options.get(i).cloned())
+                        .unwrap_or_default();
+                    modal_submit(app, ctx, text);
+                }
+            }
+            Ev::Key(b) => match b {
+                13 | 10 => {
+                    let text = app
+                        .ask_modal
+                        .as_ref()
+                        .and_then(|m| m.options.get(m.sel).cloned())
+                        .unwrap_or_default();
+                    modal_submit(app, ctx, text);
+                }
+                0x1b => {
+                    modal_submit(app, ctx, String::new());
+                }
+                b if b >= b'1' && b <= b'9' => {
+                    let i = (b - b'1') as usize;
+                    if let Some(m) = app.ask_modal.as_mut() {
+                        if i < m.options.len() {
+                            m.sel = i;
+                        }
+                    }
+                }
+                _ => {}
+            },
+        }
+        return;
+    }
     let id = match app.ask_modal.as_ref() {
         Some(m) => m.id,
         None => return,
@@ -1548,6 +1762,7 @@ fn main() {
                     label,
                     question,
                     options,
+                    buttons,
                 } => {
                     app.ask_modal = Some(AskModal {
                         id,
@@ -1555,7 +1770,11 @@ fn main() {
                         question,
                         options,
                         buf: Vec::new(),
+                        buttons,
+                        sel: 0,
+                        btn_rows: Vec::new(),
                     });
+                    app.focus = false;
                     dirty = true;
                 }
                 WEvent::PermSet { tool, value } => {
@@ -1857,8 +2076,16 @@ fn main() {
             .take(cw.saturating_sub(1))
             .collect();
             screen.text(x0i, 0, &head, 150);
-            // mesajlar
+            // mesajlar (overlay aciksa altinda kalan alana sigar)
             let hist_rows = h - 4;
+            let mut clip_top = hist_rows as i32 + 1;
+            if app.picker.is_some() || app.settings.is_some() {
+                clip_top = 1;
+            }
+            if let Some(m) = app.ask_modal.as_ref() {
+                clip_top = clip_top.min(modal_layout(m, cw, h).start);
+            }
+            let msg_rows = (clip_top - 1).max(0) as usize;
             let mut lines: Vec<(String, u8)> = Vec::new();
             for v in &app.view {
                 lines.push((v.text.clone(), v.kind.v()));
@@ -1878,14 +2105,14 @@ fn main() {
                     lines.push((l, VK::Hint.v()));
                 }
             }
-            let maxs = lines.len().saturating_sub(hist_rows);
+            let maxs = lines.len().saturating_sub(msg_rows);
             if app.scroll > maxs {
                 app.scroll = maxs;
             }
             let end = lines.len().saturating_sub(app.scroll);
-            let start = end.saturating_sub(hist_rows);
+            let start = end.saturating_sub(msg_rows);
             let shown = &lines[start..end];
-            let base = hist_rows - shown.len();
+            let base = msg_rows - shown.len();
             for (r, (txt, v)) in shown.iter().enumerate() {
                 let s: String = txt.chars().take(cw).collect();
                 screen.text(x0i, 1 + base as i32 + r as i32, &s, *v);
@@ -1942,25 +2169,42 @@ fn main() {
             }
             // izin/soru modali (en ustte)
             app.ask_pos = None;
-            if let Some(m) = app.ask_modal.as_ref() {
-                let mut rows: Vec<(String, u8)> =
-                    vec![(format!("? {} — Enter send · Esc empty", m.label), 255)];
-                for l in wrap(&m.question, cw.saturating_sub(4)) {
-                    rows.push((l, 200));
+            if app.ask_modal.is_some() {
+                let lay = {
+                    let m = app.ask_modal.as_ref().unwrap();
+                    modal_layout(m, cw, h)
+                };
+                for (r, (txt, v)) in lay.head.iter().enumerate() {
+                    let s: String = clean(txt).chars().take(cw).collect();
+                    screen.text(x0i, lay.start + r as i32, &s, *v);
                 }
-                for (i, o) in m.options.iter().enumerate() {
-                    rows.push((format!("  {}. {}", i + 1, o), 150));
+                if let Some(m) = app.ask_modal.as_mut() {
+                    if !lay.blines.is_empty() {
+                        m.btn_rows.clear();
+                        for (r, l) in lay.blines.iter().enumerate() {
+                            let gr = lay.start + lay.head.len() as i32 + r as i32;
+                            screen.text(x0i, gr, l, 150);
+                            if let Some((sx0, _, si)) =
+                                lay.bspans[r].iter().find(|(_, _, i)| *i == m.sel)
+                            {
+                                if let Some(opt) = m.options.get(*si) {
+                                    let st = format!("[{}]", clean(opt));
+                                    screen.text(x0i + *sx0 as i32, gr, &st, 255);
+                                }
+                            }
+                            let spans: Vec<(i32, i32, usize)> = lay.bspans[r]
+                                .iter()
+                                .map(|(a, b, i)| (x0i + *a as i32, x0i + *b as i32, *i))
+                                .collect();
+                            m.btn_rows.push((gr, spans));
+                        }
+                        app.ask_pos = None;
+                    } else {
+                        let blen = m.buf.len().min(cw.saturating_sub(4));
+                        let ccx = (x0i + 2 + blen as i32).min(w as i32 - 2).max(0);
+                        app.ask_pos = Some((lay.start + lay.head.len() as i32 - 1 + 1, ccx + 1));
+                    }
                 }
-                let prompt = format!("> {}", String::from_utf8_lossy(&m.buf));
-                rows.push((prompt, 255));
-                let start = (h as i32 - 4 - rows.len() as i32).max(1);
-                for (r, (txt, v)) in rows.iter().enumerate() {
-                    let s: String = txt.chars().take(cw).collect();
-                    screen.text(x0i, start + r as i32, &s, *v);
-                }
-                let blen = m.buf.len().min(cw.saturating_sub(4));
-                let ccx = (x0i + 2 + blen as i32).min(w as i32 - 2).max(0);
-                app.ask_pos = Some((start + rows.len() as i32 - 1 + 1, ccx + 1));
             }
             // ayarlar overlay
             if let Some(st) = app.settings.as_mut() {
