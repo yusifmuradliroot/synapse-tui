@@ -52,6 +52,7 @@ pub enum WEvent {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Cmd {
     Ask {
         text: String,
@@ -418,6 +419,7 @@ fn bg_tool(rt: &mut Rt, ws: &Path, name: &str, args_json: &str) -> String {
 }
 
 // Kullaniciya soru sor, cevabi bekle. None = vazgecildi/kapatildi.
+#[allow(clippy::too_many_arguments)]
 fn ask_round(
     tx: &mpsc::Sender<WEvent>,
     cmd_rx: &mpsc::Receiver<Cmd>,
